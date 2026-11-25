@@ -448,7 +448,7 @@ export function SettingsPage() {
         <dl className="space-y-1 text-sm">
           <div className="flex justify-between">
             <dt className="text-ink/60 dark:text-darktext/60">Aplikasi</dt>
-            <dd className="font-medium">TeleCore v1.2.0</dd>
+            <dd className="font-medium">TeleCore v1.2.1</dd>
           </div>
           <div className="flex justify-between">
             <dt className="text-ink/60 dark:text-darktext/60">Backend</dt>

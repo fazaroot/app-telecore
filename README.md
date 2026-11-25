@@ -59,7 +59,11 @@ fitur berbayar di TeleCore.
 - **Live Logs** — halaman Logs: 200 baris log server terakhir, live via
   WebSocket (fallback polling 5 detik).
 - **Per-bot analytics** — breakdown statistik per bot + export CSV.
-- Versi: backend `1.1.0` (`/api/health`), aplikasi `TeleCore v1.1.0`.
+- Versi: backend `1.2.1` (`/api/health`), aplikasi `TeleCore v1.2.1`.
+- **v1.2.1** — perbaikan bug halaman My Bots blank putih: form AI di modal
+  pengaturan bot dereferensi `configBot` yang masih null saat halaman
+  di-render. Ditambah `ErrorBoundary` agar error render menampilkan layar
+  error yang bisa dipulihkan, bukan layar putih.
 
 ## Fitur
 

@@ -190,7 +190,7 @@ export function Layout() {
                 ))}
               </div>
               <p className="mt-6 px-3 text-xs text-ink/50 dark:text-darktext/50">
-                TeleCore v1.2.0 — Telegram Bot Control Center
+                TeleCore v1.2.1 — Telegram Bot Control Center
               </p>
             </motion.nav>
           </>

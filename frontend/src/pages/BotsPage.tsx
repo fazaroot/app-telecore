@@ -562,7 +562,11 @@ export function BotsPage() {
               />
             </label>
             {configMutation.isPending && <p className="text-sm text-ink/60 dark:text-darktext/60">Menyimpan…</p>}
-            <BotAiSettingsForm botId={configBot!.id} />
+            {/* Elemen JSX dibuat saat BotsPage di-render, walau Modal tertutup —
+                jadi jangan dereferensi configBot di sini tanpa guard: v1.2.0
+                crash "Cannot read properties of null (reading 'id')" dan seluruh
+                aplikasi jadi layar putih. */}
+            {configBot !== null && <BotAiSettingsForm botId={configBot.id} />}
           </div>
         )}
       </Modal>

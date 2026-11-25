@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { HashRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Layout } from './components/Layout'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { PinLockScreen } from './components/PinLock'
 import { usePinStore } from './stores/pin'
 import { useSettingsStore } from './stores/settings'
@@ -64,7 +65,8 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <HashRouter>
-        <Routes>
+        <ErrorBoundary>
+          <Routes>
           <Route element={<Layout />}>
             <Route index element={<DashboardPage />} />
             <Route path="bots" element={<BotsPage />} />
@@ -85,6 +87,7 @@ export default function App() {
             <Route path="*" element={<DashboardPage />} />
           </Route>
         </Routes>
+        </ErrorBoundary>
       </HashRouter>
     </QueryClientProvider>
   )
