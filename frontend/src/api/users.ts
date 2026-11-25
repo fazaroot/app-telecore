@@ -6,11 +6,23 @@ export interface UserFilters {
   search?: string
   blocked?: boolean
   label?: string
+  tag_id?: string | number
+  segment_id?: string | number
 }
 
 export async function fetchUsers(filters: UserFilters = {}): Promise<TelegramUser[]> {
+  // Kontrak backend (ListUsersQuery): nama parameternya `q` dan
+  // `is_blocked`, bukan `search`/`blocked` — param yang salah nama akan
+  // diabaikan diam-diam oleh serde, jadi petakan di sini.
   const data = await apiRequest<unknown>('/api/users', {
-    query: { ...filters, blocked: filters.blocked === undefined ? undefined : String(filters.blocked) },
+    query: {
+      bot_id: filters.bot_id,
+      q: filters.search,
+      is_blocked: filters.blocked === undefined ? undefined : String(filters.blocked),
+      label: filters.label,
+      tag_id: filters.tag_id,
+      segment_id: filters.segment_id,
+    },
   })
   return asArray<TelegramUser>(data, ['users', 'items', 'data'])
 }
@@ -52,11 +64,13 @@ export async function fetchGroup(id: string | number): Promise<Group> {
   return apiRequest<Group>(`/api/groups/${id}`)
 }
 
-export async function updateGroupSettings(id: string | number, settings: GroupSettings): Promise<Group> {
-  return apiRequest<Group>(`/api/groups/${id}`, { method: 'PUT', body: { settings } })
+/** Kontrak v1.3: PUT /api/groups/{id}/settings (partial, body langsung settings). */
+export async function updateGroupSettings(id: string | number, settings: GroupSettings): Promise<GroupSettings> {
+  return apiRequest<GroupSettings>(`/api/groups/${id}/settings`, { method: 'PUT', body: settings })
 }
 
 export async function fetchModerationLogs(groupId: string | number): Promise<ModerationLogEntry[]> {
-  const data = await apiRequest<unknown>(`/api/groups/${groupId}/moderation-logs`)
+  // Kontrak v1.3: GET /api/groups/{id}/moderation-log (bisa paginasi {items, total, ...}).
+  const data = await apiRequest<unknown>(`/api/groups/${groupId}/moderation-log`)
   return asArray<ModerationLogEntry>(data, ['logs', 'items', 'data'])
 }

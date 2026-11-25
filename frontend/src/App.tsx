@@ -15,6 +15,7 @@ import { ChannelsPage } from './pages/ChannelsPage'
 import { MessagesPage } from './pages/MessagesPage'
 import { AutomationPage } from './pages/AutomationPage'
 import { UsersPage } from './pages/UsersPage'
+import { SegmentsPage } from './pages/SegmentsPage'
 import { GroupsPage } from './pages/GroupsPage'
 import { SchedulerPage } from './pages/SchedulerPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
@@ -76,6 +77,7 @@ export default function App() {
             <Route path="channels" element={<ChannelsPage />} />
             <Route path="automation" element={<AutomationPage />} />
             <Route path="users" element={<UsersPage />} />
+            <Route path="segments" element={<SegmentsPage />} />
             <Route path="groups" element={<GroupsPage />} />
             <Route path="scheduler" element={<SchedulerPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />

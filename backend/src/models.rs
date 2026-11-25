@@ -488,6 +488,72 @@ pub struct AiUsage {
 }
 
 // ---------------------------------------------------------------------------
+// v1.3: CRM (tags, notes, segmen) + manajemen grup
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserTag {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserTagAssignment {
+    pub user_id: String,
+    pub tag_id: String,
+    pub assigned_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserNote {
+    pub id: String,
+    pub user_id: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Segment {
+    pub id: String,
+    pub name: String,
+    pub bot_id: Option<String>,
+    #[serde(serialize_with = "ser_json_str")]
+    pub criteria: String, // JSON object string
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GroupSettings {
+    pub chat_id: i64,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub welcome_enabled: i64,
+    pub welcome_message: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub anti_spam_enabled: i64,
+    pub flood_limit: i64,
+    pub flood_window_seconds: i64,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub block_links: i64,
+    #[serde(serialize_with = "ser_json_str")]
+    pub banned_words: String, // JSON array string
+    pub violation_action: String, // delete | warn | mute
+    pub mute_duration_minutes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GroupModerationLog {
+    pub id: String,
+    pub chat_id: i64,
+    pub user_id: Option<i64>,
+    pub action: String,
+    pub reason: Option<String>,
+    pub created_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
 

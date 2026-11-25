@@ -11,6 +11,7 @@ pub mod backups;
 pub mod bots;
 pub mod channels;
 pub mod commands;
+pub mod crm;
 pub mod groups;
 pub mod health;
 pub mod inbox;
@@ -97,13 +98,50 @@ pub fn build_router(state: AppState) -> Router<()> {
         .route("/users/:id", get(users::get_user).put(users::update_user))
         .route("/users/:id/block", post(users::block_user))
         .route("/users/:id/unblock", post(users::unblock_user))
+        // CRM v1.3: tags + notes per user, timeline
+        .route(
+            "/users/:id/tags",
+            get(crm::list_user_tags).post(crm::assign_user_tag),
+        )
+        .route("/users/:id/tags/:tag_id", delete(crm::remove_user_tag))
+        .route(
+            "/users/:id/notes",
+            get(crm::list_user_notes).post(crm::create_user_note),
+        )
+        .route("/users/:id/notes/:note_id", delete(crm::delete_user_note))
+        .route("/users/:id/timeline", get(crm::get_user_timeline))
+        // CRM v1.3: tags
+        .route("/tags", get(crm::list_tags).post(crm::create_tag))
+        .route(
+            "/tags/:id",
+            put(crm::update_tag).delete(crm::delete_tag),
+        )
+        // CRM v1.3: segmen
+        .route(
+            "/segments",
+            get(crm::list_segments).post(crm::create_segment),
+        )
+        .route("/segments/preview", post(crm::preview_segment))
+        .route(
+            "/segments/:id",
+            get(crm::get_segment)
+                .put(crm::update_segment)
+                .delete(crm::delete_segment),
+        )
+        .route("/segments/:id/members", get(crm::segment_members_handler))
+        .route("/segments/:id/follow-up", post(crm::segment_follow_up))
         // Groups
         .route("/groups", get(groups::list_groups))
         .route(
             "/groups/:id",
             get(groups::get_group).put(groups::update_group_settings),
         )
-        .route("/groups/:id/settings", put(groups::update_group_settings))
+        .route(
+            "/groups/:id/settings",
+            get(groups::get_group_settings).put(groups::update_group_settings_v13),
+        )
+        .route("/groups/:id/stats", get(groups::group_stats))
+        .route("/groups/:id/moderation-log", get(groups::moderation_log))
         .route("/groups/:id/moderation-logs", get(groups::moderation_logs))
         .route("/groups/:id/moderate", post(groups::moderate))
         // Automation

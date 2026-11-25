@@ -11,10 +11,17 @@
 use crate::automation::{render_template, run_workflows};
 use crate::bot::get_bot_token;
 use crate::bot::telegram::{SendMessageParams, TelegramMessage, Update};
-use crate::models::{new_id, now_rfc3339, BotChat, BotCommand};
+use crate::models::{new_id, now_rfc3339, BotChat, BotCommand, GroupSettings};
 use crate::services::ai::{automation_handled, maybe_ai_reply};
+use crate::services::group_moderation::{
+    detect_text_violations, enforcement_active, flood_count, record_moderation, Violation,
+};
 use crate::services::outgoing_webhooks::dispatch_outgoing_event;
+use crate::services::template_vars::{render_template_vars, TemplateVars};
 use crate::state::AppState;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration as StdDuration, Instant};
 
 // ---------------------------------------------------------------------------
 // Activity log helper (dipakai banyak modul)
@@ -391,6 +398,50 @@ async fn handle_successful_payment(
 }
 
 async fn send_welcome_if_configured(state: &AppState, bot_id: &str, chat_id: i64, first_name: &str) {
+    // v1.3: group_settings (welcome_enabled + welcome_message dengan
+    // substitusi {{first_name}} / {{chat_title}}).
+    let gs: Option<GroupSettings> =
+        sqlx::query_as("SELECT * FROM group_settings WHERE chat_id = ?")
+            .bind(chat_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some(gs) = gs {
+        if gs.welcome_enabled != 0 {
+            if let Some(welcome) = gs.welcome_message.as_deref() {
+                if !welcome.trim().is_empty() {
+                    let chat_row = sqlx::query_as::<_, BotChat>(
+                        "SELECT * FROM bot_chats WHERE bot_id = ? AND chat_id = ?",
+                    )
+                    .bind(bot_id)
+                    .bind(chat_id)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    let vars = TemplateVars::new(
+                        Some(first_name.to_string()),
+                        None,
+                        chat_row.and_then(|c| c.title),
+                    );
+                    let text = render_template_vars(welcome, &vars);
+                    if let Ok(token) = get_bot_token(state, bot_id).await {
+                        let _ = state
+                            .telegram
+                            .send_message(&token, &SendMessageParams {
+                                chat_id,
+                                text,
+                                ..Default::default()
+                            })
+                            .await;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    // Legacy fallback: bot_chats.settings welcome_message.
     let chat_row = sqlx::query_as::<_, BotChat>(
         "SELECT * FROM bot_chats WHERE bot_id = ? AND chat_id = ?",
     )
@@ -425,9 +476,284 @@ async fn send_welcome_if_configured(state: &AppState, bot_id: &str, chat_id: i64
     }
 }
 
-/// Moderasi grup dasar: keyword filter, link filter, flood detection.
-/// Eksekusi (hapus pesan) HANYA bila bot admin; bila bukan admin, hanya catat log.
+/// Cache hasil cek `getChatMember` (admin/creator) max 60 detik per
+/// (bot, chat, user) agar penegakan tidak membanjiri Bot API.
+/// Cache proses-lokal; salah ketik status terburuk hanya bertahan 60 detik.
+static ADMIN_CHECK_CACHE: std::sync::OnceLock<
+    Mutex<HashMap<String, (bool, Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn admin_cache() -> &'static Mutex<HashMap<String, (bool, Instant)>> {
+    ADMIN_CHECK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Apakah user ini admin/creator di chat (via getChatMember, cache 60 dtk).
+/// Error jaringan → dianggap BUKAN admin (pemanggil yang memutuskan apakah
+/// itu berarti "lewati penegakan" atau "lanjut dengan risiko gagal").
+async fn is_chat_privileged(
+    state: &AppState,
+    token: &str,
+    bot_id: &str,
+    chat_id: i64,
+    user_id: i64,
+) -> bool {
+    let key = format!("{bot_id}:{chat_id}:{user_id}");
+    {
+        let cache = admin_cache().lock().unwrap();
+        if let Some((admin, at)) = cache.get(&key) {
+            if at.elapsed() < StdDuration::from_secs(60) {
+                return *admin;
+            }
+        }
+    }
+    let admin = match state.telegram.get_chat_member(token, chat_id, user_id).await {
+        Ok(m) => m.status == "administrator" || m.status == "creator",
+        Err(_) => false,
+    };
+    let mut cache = admin_cache().lock().unwrap();
+    cache.insert(key, (admin, Instant::now()));
+    admin
+}
+
+/// Ambil telegram_id bot sendiri (kolom bots.telegram_id, fallback getMe).
+/// None bila Telegram tidak terjangkau — pemanggil memperlakukannya sebagai
+/// "tidak bisa memverifikasi admin" (penegakan dilewati, bukan crash).
+async fn own_telegram_id(state: &AppState, bot_id: &str, token: &str) -> Option<i64> {
+    let row: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT telegram_id FROM bots WHERE id = ?")
+            .bind(bot_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some((Some(id),)) = row {
+        return Some(id);
+    }
+    match state.telegram.get_me(token).await {
+        Ok(me) => {
+            let _ = sqlx::query("UPDATE bots SET telegram_id = ? WHERE id = ?")
+                .bind(me.id)
+                .bind(bot_id)
+                .execute(&state.pool)
+                .await;
+            Some(me.id)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Moderasi grup: bila ada aturan v1.3 yang aktif di `group_settings`,
+/// pakai penegakan v1.3; bila tidak, fallback ke aturan legacy
+/// (keyword_filter / link_filter / anti_spam dari `bot_chats.settings`).
 async fn moderate_group_message(
+    state: &AppState,
+    bot_id: &str,
+    msg: &TelegramMessage,
+    text: &str,
+) {
+    // Pesan service (join/leave) tidak dimoderasi.
+    if msg.new_chat_members.is_some() || msg.left_chat_member.is_some() {
+        return;
+    }
+    let chat_id = msg.chat.id;
+    let gs: Option<GroupSettings> =
+        sqlx::query_as("SELECT * FROM group_settings WHERE chat_id = ?")
+            .bind(chat_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some(gs) = gs {
+        if enforcement_active(&gs) {
+            enforce_v13_group_message(state, bot_id, msg, text, &gs).await;
+            return;
+        }
+    }
+    moderate_group_message_legacy(state, bot_id, msg, text).await;
+}
+
+/// Penegakan v1.3: kata terlarang, block link, flood (hitung dari tabel
+/// messages). Hanya untuk grup/supergrup; pesan privat tidak sampai sini.
+/// - Admin/creator grup dan bot sendiri tidak pernah dibatasi.
+/// - Satu pesan hanya diproses satu kali (processor sekali per update).
+/// - Bila bot bukan admin: catat ke log, lewati penegakan, jangan crash.
+async fn enforce_v13_group_message(
+    state: &AppState,
+    bot_id: &str,
+    msg: &TelegramMessage,
+    text: &str,
+    gs: &GroupSettings,
+) {
+    let chat_id = msg.chat.id;
+    let user_id = match msg.from.as_ref() {
+        Some(u) => u.id,
+        None => return,
+    };
+
+    let mut violations = detect_text_violations(text, gs);
+    let mut flooded = false;
+    if gs.anti_spam_enabled != 0 && gs.flood_limit > 0 {
+        match flood_count(
+            state,
+            bot_id,
+            chat_id,
+            user_id,
+            gs.flood_window_seconds,
+        )
+        .await
+        {
+            Ok(n) if n > gs.flood_limit => {
+                flooded = true;
+                violations.push(Violation::Flood);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Gagal menghitung flood di chat {chat_id}: {e}");
+            }
+        }
+    }
+    if violations.is_empty() {
+        return;
+    }
+    let violation_names: Vec<&str> = violations
+        .iter()
+        .map(|v| match v {
+            Violation::BannedWord => "banned_word",
+            Violation::Link => "link",
+            Violation::Flood => "flood",
+        })
+        .collect();
+
+    let Ok(token) = get_bot_token(state, bot_id).await else {
+        // Tanpa token tidak ada yang bisa dieksekusi; catat lalu lewati.
+        record_moderation(
+            state,
+            bot_id,
+            chat_id,
+            Some(user_id),
+            "logged_only_no_token",
+            Some("Pelanggaran terdeteksi tetapi token bot tidak tersedia"),
+            serde_json::json!({"chat_id": chat_id, "user_id": user_id, "message_id": msg.message_id, "violations": violation_names, "via": "auto"}),
+        )
+        .await;
+        return;
+    };
+    let Some(bot_tg_id) = own_telegram_id(state, bot_id, &token).await else {
+        // Telegram tidak terjangkau: tidak bisa verifikasi admin — catat,
+        // lewati penegakan, jangan crash. Pesan tetap tersimpan normal.
+        record_moderation(
+            state,
+            bot_id,
+            chat_id,
+            Some(user_id),
+            "logged_only_telegram_unreachable",
+            Some("Pelanggaran terdeteksi tetapi Telegram tidak terjangkau (tidak bisa cek admin)"),
+            serde_json::json!({"chat_id": chat_id, "user_id": user_id, "message_id": msg.message_id, "violations": violation_names, "via": "auto"}),
+        )
+        .await;
+        return;
+    };
+
+    // Bot harus admin untuk mengeksekusi apa pun.
+    if !is_chat_privileged(state, &token, bot_id, chat_id, bot_tg_id).await {
+        record_moderation(
+            state,
+            bot_id,
+            chat_id,
+            Some(user_id),
+            "logged_only_not_admin",
+            Some("Pelanggaran terdeteksi tetapi bot bukan admin di grup ini"),
+            serde_json::json!({"chat_id": chat_id, "user_id": user_id, "message_id": msg.message_id, "violations": violation_names, "via": "auto"}),
+        )
+        .await;
+        return;
+    }
+
+    // Admin/creator grup tidak pernah dibatasi.
+    if is_chat_privileged(state, &token, bot_id, chat_id, user_id).await {
+        return;
+    }
+
+    // Eksekusi: selalu hapus pesan yang melanggar.
+    let delete_ok = state
+        .telegram
+        .delete_message(&token, chat_id, msg.message_id)
+        .await
+        .is_ok();
+    if !delete_ok {
+        tracing::warn!("Gagal menghapus pesan melanggar di chat {chat_id}");
+    }
+
+    // Aksi tambahan: flood selalu mute; selain itu ikut violation_action
+    // (mute/warn). violation_action=delete berarti hanya hapus.
+    let mut action_taken = "auto_delete";
+    if flooded {
+        let until =
+            chrono::Utc::now().timestamp() + gs.mute_duration_minutes.max(0) * 60;
+        if state
+            .telegram
+            .restrict_chat_member_until(&token, chat_id, user_id, false, Some(until))
+            .await
+            .is_ok()
+        {
+            action_taken = "auto_mute_flood";
+        }
+    } else if gs.violation_action == "mute" {
+        let until =
+            chrono::Utc::now().timestamp() + gs.mute_duration_minutes.max(0) * 60;
+        if state
+            .telegram
+            .restrict_chat_member_until(&token, chat_id, user_id, false, Some(until))
+            .await
+            .is_ok()
+        {
+            action_taken = "auto_mute";
+        }
+    } else if gs.violation_action == "warn" {
+        let first_name = msg
+            .from
+            .as_ref()
+            .map(|u| u.first_name.clone())
+            .unwrap_or_default();
+        let warn_text = format!(
+            "⚠️ {first_name}, pesanmu dihapus karena melanggar aturan grup."
+        );
+        let _ = state
+            .telegram
+            .send_message(&token, &SendMessageParams {
+                chat_id,
+                text: warn_text,
+                ..Default::default()
+            })
+            .await;
+        action_taken = "auto_warn";
+    }
+
+    record_moderation(
+        state,
+        bot_id,
+        chat_id,
+        Some(user_id),
+        action_taken,
+        Some(&format!("Pelanggaran otomatis: {}", violation_names.join(", "))),
+        serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "message_id": msg.message_id,
+            "violations": violation_names,
+            "action": action_taken,
+            "delete_ok": delete_ok,
+            "via": "auto",
+        }),
+    )
+    .await;
+}
+
+/// Moderasi grup dasar (legacy, dari `bot_chats.settings` JSON):
+/// keyword filter, link filter, flood detection.
+/// Eksekusi (hapus pesan) HANYA bila bot admin; bila bukan admin, hanya catat log.
+/// Dipakai bila tidak ada aturan v1.3 yang aktif di `group_settings`.
+async fn moderate_group_message_legacy(
     state: &AppState,
     bot_id: &str,
     msg: &TelegramMessage,
@@ -628,4 +954,198 @@ async fn handle_command(state: &AppState, bot_id: &str, msg: &TelegramMessage, t
         "info",
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bot::telegram::Update;
+
+    /// AppState test: SQLite in-memory + migrasi, token palsu terenkripsi.
+    /// Panggilan ke api.telegram.org dengan token palsu SELALU gagal
+    /// (401 / tidak terjangkau) — penegakan harus mencatat ke log dan
+    /// melanjutkan, bukan crash. Itulah yang diuji di sini.
+    async fn test_state() -> AppState {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = crate::config::Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            database_url: "sqlite::memory:".to_string(),
+            api_key: "test-key".to_string(),
+            rust_log: "info".to_string(),
+        };
+        let crypto =
+            std::sync::Arc::new(crate::security::Crypto::from_key_bytes([9u8; 32]));
+        let encrypted = crypto.encrypt("123456:FAKE-TOKEN").unwrap();
+        let now = now_rfc3339();
+        sqlx::query(
+            "INSERT INTO bots (id, name, token_encrypted, token_masked, status, created_at, updated_at) \
+             VALUES ('bot-1', 'Bot Test', ?, '****', 'disconnected', ?, ?)",
+        )
+        .bind(&encrypted)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let telegram = crate::bot::telegram::TelegramClient::new().unwrap();
+        AppState::new(pool, config, crypto, telegram)
+    }
+
+    async fn seed_group(state: &AppState, chat_id: i64, settings: &str) {
+        let now = now_rfc3339();
+        sqlx::query(
+            "INSERT INTO bot_chats (id, bot_id, chat_id, type, title, created_at, updated_at) \
+             VALUES (?, 'bot-1', ?, 'supergroup', 'Grup Test', ?, ?)",
+        )
+        .bind(format!("chat-{chat_id}"))
+        .bind(chat_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        // settings = daftar nilai kolom SETELAH chat_id, sesuai urutan:
+        // welcome_enabled, welcome_message, anti_spam_enabled, flood_limit,
+        // flood_window_seconds, block_links, banned_words, violation_action,
+        // mute_duration_minutes.
+        sqlx::query(&format!(
+            "INSERT INTO group_settings (chat_id, welcome_enabled, welcome_message, \
+             anti_spam_enabled, flood_limit, flood_window_seconds, block_links, \
+             banned_words, violation_action, mute_duration_minutes) \
+             VALUES (?, {settings})"
+        ))
+        .bind(chat_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+
+    fn group_update(message_id: i64, chat_id: i64, user_id: i64, text: &str) -> Update {
+        serde_json::from_value(serde_json::json!({
+            "update_id": message_id,
+            "message": {
+                "message_id": message_id,
+                "from": {"id": user_id, "is_bot": false, "first_name": "Budi"},
+                "chat": {"id": chat_id, "type": "supergroup", "title": "Grup Test"},
+                "date": 1793412000,
+                "text": text,
+            }
+        }))
+        .unwrap()
+    }
+
+    async fn mod_log_count(state: &AppState, chat_id: i64) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM group_moderation_log WHERE chat_id = ?",
+        )
+        .bind(chat_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn mod_log_actions(state: &AppState, chat_id: i64) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT action FROM group_moderation_log WHERE chat_id = ? ORDER BY created_at",
+        )
+        .bind(chat_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn banned_word_message_is_logged_not_crashed() {
+        let state = test_state().await;
+        seed_group(&state, -100123, "0, NULL, 1, 5, 10, 1, '[\"judi\"]', 'delete', 60").await;
+        process_update(&state, "bot-1", &group_update(1, -100123, 777, "ayo main JUDI bareng")).await;
+        assert_eq!(mod_log_count(&state, -100123).await, 1);
+        let actions = mod_log_actions(&state, -100123).await;
+        assert!(
+            actions[0].starts_with("logged_only"),
+            "dengan token palsu penegakan dicatat, bukan dieksekusi: {}",
+            actions[0]
+        );
+        // Pesan tetap tersimpan normal (tidak hilang karena moderasi).
+        let saved: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE bot_id = 'bot-1' AND chat_id = -100123",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, 1);
+        // activity_logs juga mendapat baris moderation.
+        let acts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_logs WHERE action = 'moderation'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(acts, 1);
+    }
+
+    #[tokio::test]
+    async fn link_message_is_logged_and_clean_message_is_not() {
+        let state = test_state().await;
+        seed_group(&state, -100124, "0, NULL, 0, 5, 10, 1, '[]', 'delete', 60").await;
+        process_update(&state, "bot-1", &group_update(1, -100124, 777, "halo semua, apa kabar?")).await;
+        assert_eq!(mod_log_count(&state, -100124).await, 0);
+        process_update(&state, "bot-1", &group_update(2, -100124, 777, "cek https://example.com yuk")).await;
+        assert_eq!(mod_log_count(&state, -100124).await, 1);
+    }
+
+    #[tokio::test]
+    async fn flood_triggers_after_limit_within_window() {
+        let state = test_state().await;
+        seed_group(&state, -100125, "0, NULL, 1, 2, 60, 0, '[]', 'delete', 30").await;
+        process_update(&state, "bot-1", &group_update(1, -100125, 777, "pesan satu")).await;
+        process_update(&state, "bot-1", &group_update(2, -100125, 777, "pesan dua")).await;
+        assert_eq!(mod_log_count(&state, -100125).await, 0);
+        process_update(&state, "bot-1", &group_update(3, -100125, 777, "pesan tiga")).await;
+        assert_eq!(mod_log_count(&state, -100125).await, 1);
+    }
+
+    #[tokio::test]
+    async fn welcome_event_does_not_crash_and_is_logged() {
+        let state = test_state().await;
+        seed_group(
+            &state,
+            -100126,
+            "1, 'Halo {{first_name}} di {{chat_title}}!', 0, 5, 10, 0, '[]', 'delete', 60",
+        )
+        .await;
+        // Substitusi template sudah diuji unit di template_vars; di sini
+        // pastikan event join tidak crash dan tercatat user_joined_group
+        // (pengiriman welcome dengan token palsu gagal diam-diam).
+        let update: Update = serde_json::from_value(serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 111, "is_bot": false, "first_name": "Admin"},
+                "chat": {"id": -100126, "type": "supergroup", "title": "Grup Test"},
+                "date": 1793412000,
+                "new_chat_members": [{"id": 333, "is_bot": false, "first_name": "Citra"}]
+            }
+        }))
+        .unwrap();
+        process_update(&state, "bot-1", &update).await;
+        let joined: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_logs WHERE action = 'user_joined_group'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(joined, 1);
+    }
 }

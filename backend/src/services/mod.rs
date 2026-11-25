@@ -1,7 +1,9 @@
 //! Logika bisnis bersama: pemrosesan update Telegram + activity log.
 
 pub mod ai;
+pub mod group_moderation;
 pub mod outgoing_webhooks;
+pub mod segments;
 pub mod template_vars;
 pub mod tokens;
 pub mod update_processor;

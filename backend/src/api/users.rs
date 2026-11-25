@@ -9,12 +9,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::{QueryBuilder, Sqlite};
 
 use crate::error::{AppError, AppResult, Envelope};
 use crate::models::{
     now_rfc3339, ActivityLog, BotUser, Message, Paginated, Pagination,
 };
 use crate::services::log_activity;
+use crate::services::segments::{parse_criteria, push_segment_conditions, SegmentCriteria};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, Default)]
@@ -22,6 +24,10 @@ pub struct ListUsersQuery {
     pub bot_id: Option<String>,
     pub q: Option<String>,
     pub is_blocked: Option<bool>,
+    /// Filter: user punya tag ini.
+    pub tag_id: Option<String>,
+    /// Filter: user anggota segmen ini (dikombinasi AND dengan filter lain).
+    pub segment_id: Option<String>,
     #[serde(flatten)]
     pub pagination: Pagination,
 }
@@ -46,14 +52,14 @@ async fn fetch_user(state: &AppState, id: &str) -> AppResult<BotUser> {
         .ok_or_else(|| AppError::NotFound(format!("user {id} tidak ditemukan")))
 }
 
-pub async fn list_users(
-    State(state): State<AppState>,
-    Query(q): Query<ListUsersQuery>,
-) -> AppResult<Json<Envelope<Paginated<BotUser>>>> {
-    let (page, per_page) = q.pagination.normalized();
-    let offset = q.pagination.offset();
-
-    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM bot_users WHERE 1=1");
+/// Terapkan filter daftar user ke QueryBuilder (dipakai query SELECT dan
+/// COUNT agar konsisten). `seg` = kriteria segmen yang sudah dimuat (bila
+/// `segment_id` diminta).
+fn apply_list_filters<'a>(
+    qb: &mut QueryBuilder<'a, Sqlite>,
+    q: &'a ListUsersQuery,
+    seg: Option<&'a SegmentCriteria>,
+) {
     if let Some(b) = &q.bot_id {
         qb.push(" AND bot_id = ").push_bind(b);
     }
@@ -70,6 +76,48 @@ pub async fn list_users(
             .push_bind(pattern)
             .push(")");
     }
+    if let Some(tag_id) = &q.tag_id {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM user_tag_assignments a \
+             WHERE a.user_id = bot_users.id AND a.tag_id = ",
+        )
+        .push_bind(tag_id)
+        .push(")");
+    }
+    if let Some(criteria) = seg {
+        push_segment_conditions(qb, criteria, chrono::Utc::now());
+    }
+}
+
+pub async fn list_users(
+    State(state): State<AppState>,
+    Query(q): Query<ListUsersQuery>,
+) -> AppResult<Json<Envelope<Paginated<BotUser>>>> {
+    let (page, per_page) = q.pagination.normalized();
+    let offset = q.pagination.offset();
+
+    // Muat kriteria segmen dulu (404 bila segment_id tidak dikenal).
+    let seg_criteria: Option<SegmentCriteria> = match &q.segment_id {
+        Some(seg_id) => {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT criteria FROM segments WHERE id = ?")
+                    .bind(seg_id)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            let Some((criteria_json,)) = row else {
+                return Err(AppError::NotFound(format!(
+                    "segmen {seg_id} tidak ditemukan"
+                )));
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&criteria_json).unwrap_or(json!({}));
+            Some(parse_criteria(&value)?)
+        }
+        None => None,
+    };
+
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM bot_users WHERE 1=1");
+    apply_list_filters(&mut qb, &q, seg_criteria.as_ref());
     qb.push(" ORDER BY last_seen_at DESC LIMIT ")
         .push_bind(per_page)
         .push(" OFFSET ")
@@ -77,25 +125,7 @@ pub async fn list_users(
     let items = qb.build_query_as::<BotUser>().fetch_all(&state.pool).await?;
 
     let mut count_qb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM bot_users WHERE 1=1");
-    if let Some(b) = &q.bot_id {
-        count_qb.push(" AND bot_id = ").push_bind(b);
-    }
-    if let Some(blocked) = q.is_blocked {
-        count_qb
-            .push(" AND is_blocked = ")
-            .push_bind(if blocked { 1 } else { 0 });
-    }
-    if let Some(search) = &q.q {
-        let pattern = format!("%{}%", search.trim());
-        count_qb
-            .push(" AND (username LIKE ")
-            .push_bind(pattern.clone())
-            .push(" OR first_name LIKE ")
-            .push_bind(pattern.clone())
-            .push(" OR last_name LIKE ")
-            .push_bind(pattern)
-            .push(")");
-    }
+    apply_list_filters(&mut count_qb, &q, seg_criteria.as_ref());
     let total = count_qb
         .build_query_scalar::<i64>()
         .fetch_one(&state.pool)
@@ -237,11 +267,27 @@ pub async fn export_users(
         }
     };
     let mut csv = String::from(
-        "id,bot_id,telegram_user_id,username,first_name,last_name,language_code,is_blocked,message_count,last_seen_at,created_at\n",
+        "id,bot_id,telegram_user_id,username,first_name,last_name,language_code,is_blocked,message_count,last_seen_at,created_at,tags\n",
     );
+    // Nama tag per user (satu query), dipisah ';' di kolom tags.
+    let tag_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT a.user_id, t.name FROM user_tag_assignments a \
+         JOIN user_tags t ON t.id = a.tag_id ORDER BY t.name",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let mut tags_by_user: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (user_id, name) in tag_rows {
+        tags_by_user.entry(user_id).or_default().push(name);
+    }
     for u in users {
+        let tags = tags_by_user
+            .get(&u.id)
+            .map(|names| names.join(";"))
+            .unwrap_or_default();
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_escape(&u.id),
             csv_escape(&u.bot_id),
             u.telegram_user_id,
@@ -253,6 +299,7 @@ pub async fn export_users(
             u.message_count,
             csv_escape(u.last_seen_at.as_deref().unwrap_or("")),
             csv_escape(&u.created_at),
+            csv_escape(&tags),
         ));
     }
     let response = Response::builder()

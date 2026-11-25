@@ -208,6 +208,17 @@ impl TelegramClient {
         })
     }
 
+    /// Konstruktor dengan base URL kustom — dipakai test dengan server
+    /// Telegram palsu lokal. Produksi selalu memakai `new()`.
+    #[cfg(test)]
+    pub fn with_base_url(base_url: String) -> anyhow::Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("TeleCore/0.1 (+https://github.com/fazaroot)")
+            .build()?;
+        Ok(Self { http, base_url })
+    }
+
     fn url(&self, token: &str, method: &str) -> String {
         format!("{}/bot{}/{}", self.base_url, token, method)
     }
@@ -459,6 +470,18 @@ impl TelegramClient {
         .await
     }
 
+    /// Jumlah anggota chat (getChatMemberCount). Gagal bila bot bukan
+    /// anggota chat / tidak punya akses — pemanggil memakai fallback
+    /// `member_count` tersimpan.
+    pub async fn get_chat_member_count(&self, token: &str, chat_id: i64) -> AppResult<i64> {
+        self.call(
+            token,
+            "getChatMemberCount",
+            &serde_json::json!({"chat_id": chat_id}),
+        )
+        .await
+    }
+
     /// Apakah bot sendiri admin/creator di chat ini (dipakai sebelum moderasi).
     pub async fn is_bot_admin(&self, token: &str, chat_id: i64, bot_user_id: i64) -> bool {
         match self.get_chat_member(token, chat_id, bot_user_id).await {
@@ -513,16 +536,30 @@ impl TelegramClient {
         user_id: i64,
         can_send_messages: bool,
     ) -> AppResult<bool> {
-        self.call(
-            token,
-            "restrictChatMember",
-            &serde_json::json!({
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "permissions": {"can_send_messages": can_send_messages},
-            }),
-        )
-        .await
+        self.restrict_chat_member_until(token, chat_id, user_id, can_send_messages, None)
+            .await
+    }
+
+    /// Restrict dengan `until_date` (Unix timestamp, detik) opsional.
+    /// `until_date = None` = tanpa batas waktu (dipakai unmute/izin penuh
+    /// lewat `can_send_messages = true`).
+    pub async fn restrict_chat_member_until(
+        &self,
+        token: &str,
+        chat_id: i64,
+        user_id: i64,
+        can_send_messages: bool,
+        until_date: Option<i64>,
+    ) -> AppResult<bool> {
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "permissions": {"can_send_messages": can_send_messages},
+        });
+        if let Some(until) = until_date {
+            body["until_date"] = serde_json::Value::from(until);
+        }
+        self.call(token, "restrictChatMember", &body).await
     }
 
     // --- Poll, sticker & pembayaran (v1.2) ---
@@ -660,5 +697,93 @@ mod tests {
         let members = msg.new_chat_members.unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].first_name, "Citra");
+    }
+
+    /// Server Telegram palsu (TCP lokal): membalas setiap request dengan
+    /// `canned` JSON dan merekam request mentah ke channel. Dipakai untuk
+    /// menguji method client tanpa menyentuh api.telegram.org.
+    fn fake_telegram_server(
+        canned: &str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let canned = canned.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            head.push_str(&line);
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let content_len = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("Content-Length:")
+                            .or_else(|| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; content_len];
+                if content_len > 0 {
+                    let _ = reader.read_exact(&mut body);
+                }
+                let raw = format!("{head}{}", String::from_utf8_lossy(&body));
+                let _ = tx.send(raw);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    canned.len(),
+                    canned
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn get_chat_member_count_against_fake_server() {
+        let (base, rx) = fake_telegram_server(r#"{"ok":true,"result":42}"#);
+        let client = TelegramClient::with_base_url(base).unwrap();
+        let count = client.get_chat_member_count("FAKE", -100123).await.unwrap();
+        assert_eq!(count, 42);
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(req.contains("getChatMemberCount"));
+        assert!(req.contains("-100123"));
+    }
+
+    #[tokio::test]
+    async fn restrict_with_until_date_sends_until_date() {
+        let (base, rx) = fake_telegram_server(r#"{"ok":true,"result":true}"#);
+        let client = TelegramClient::with_base_url(base).unwrap();
+        let ok = client
+            .restrict_chat_member_until("FAKE", -100123, 777, false, Some(1793412000))
+            .await
+            .unwrap();
+        assert!(ok);
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(req.contains("restrictChatMember"));
+        assert!(req.contains("1793412000"));
+        assert!(req.contains("can_send_messages"));
+    }
+
+    #[tokio::test]
+    async fn telegram_api_error_surfaces_as_error() {
+        let (base, _rx) =
+            fake_telegram_server(r#"{"ok":false,"error_code":403,"description":"Forbidden: bot is not a member"}"#);
+        let client = TelegramClient::with_base_url(base).unwrap();
+        let err = client.get_chat_member_count("FAKE", -100123).await.unwrap_err();
+        assert!(err.to_string().contains("403"));
     }
 }

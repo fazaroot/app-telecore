@@ -7,6 +7,7 @@ import {
   Bot,
   CalendarClock,
   CreditCard,
+  Filter,
   Home,
   Inbox,
   Megaphone,
@@ -37,6 +38,7 @@ const NAV_ITEMS = [
   { to: '/channels', label: 'Channels', icon: Megaphone },
   { to: '/automation', label: 'Automation', icon: Workflow },
   { to: '/users', label: 'Users', icon: Users },
+  { to: '/segments', label: 'Segmen', icon: Filter },
   { to: '/groups', label: 'Groups', icon: UsersRound },
   { to: '/scheduler', label: 'Scheduler', icon: CalendarClock },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
@@ -190,7 +192,7 @@ export function Layout() {
                 ))}
               </div>
               <p className="mt-6 px-3 text-xs text-ink/50 dark:text-darktext/50">
-                TeleCore v1.2.1 — Telegram Bot Control Center
+                TeleCore v1.3.0 — Telegram Bot Control Center
               </p>
             </motion.nav>
           </>

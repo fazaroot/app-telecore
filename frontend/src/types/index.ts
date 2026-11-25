@@ -88,6 +88,10 @@ export interface TelegramUser {
   last_name?: string | null
   notes?: string | null
   labels?: string[]
+  tags?: UserTag[]
+  message_count?: number
+  total_orders?: number
+  has_ordered?: boolean
   is_blocked?: boolean
   last_seen?: string
   last_seen_at?: string
@@ -109,7 +113,17 @@ export interface Group {
 }
 
 export interface GroupSettings {
+  // Kontrak v1.3 (PUT /api/groups/{id}/settings, partial)
+  welcome_enabled?: boolean
   welcome_message?: string
+  anti_spam_enabled?: boolean
+  flood_limit?: number
+  flood_window_seconds?: number
+  block_links?: boolean
+  banned_words?: string[]
+  violation_action?: 'delete' | 'warn' | 'mute' | string
+  mute_duration_minutes?: number
+  // Field lama (pra-v1.3) — dipertahankan agar data lama tidak crash di UI
   keyword_filter?: string[]
   anti_spam?: boolean
   link_filter?: boolean
@@ -126,6 +140,87 @@ export interface ModerationLogEntry {
   action?: string
   reason?: string
   created_at?: string
+}
+
+// --- v1.3: CRM — Tag, Catatan, Segmen, Timeline ---
+
+export interface UserTag {
+  id: string | number
+  name: string
+  color?: string
+  created_at?: string
+}
+
+export interface UserNote {
+  id: string | number
+  user_id?: string | number
+  note: string
+  created_at?: string
+}
+
+export interface SegmentCriteria {
+  any_tags?: (string | number)[]
+  has_ordered?: boolean
+  last_active_within_days?: number
+  last_active_over_days_ago?: number
+  min_messages?: number
+}
+
+export interface Segment {
+  id: string | number
+  name: string
+  criteria?: SegmentCriteria
+  member_count?: number
+  created_at?: string
+  updated_at?: string
+}
+
+export interface SegmentMembersPage {
+  items: TelegramUser[]
+  total: number
+  page: number
+  per_page: number
+}
+
+export interface SegmentFollowUpResult {
+  total: number
+  sent: number
+  failed: number
+  broadcast_id?: string | number
+  /** Semua broadcast yang dibuat (satu per bot). */
+  broadcast_ids?: (string | number)[]
+  /** Jumlah anggota yang cocok sebelum batas 1000. */
+  matched?: number
+  /** true bila anggota dipotong ke 1000 penerima pertama. */
+  capped_at_1000?: boolean
+  /** 'running' | 'done' — status akhir setelah polling (bila ada). */
+  status?: string
+}
+
+export type TimelineKind = 'message' | 'order' | 'note' | 'tag'
+
+export interface TimelineItem {
+  kind: TimelineKind | string
+  created_at: string
+  summary: string
+  data?: Record<string, unknown>
+}
+
+// --- v1.3: Manajemen grup — Statistik ---
+
+export interface GroupTopSender {
+  user_id: string | number
+  username?: string | null
+  first_name?: string
+  count: number
+}
+
+export interface GroupStats {
+  member_count?: number
+  messages_today?: number
+  messages_7d?: number
+  active_users_7d?: number
+  top_senders?: GroupTopSender[]
 }
 
 export interface Workflow {

@@ -59,11 +59,39 @@ fitur berbayar di TeleCore.
 - **Live Logs** — halaman Logs: 200 baris log server terakhir, live via
   WebSocket (fallback polling 5 detik).
 - **Per-bot analytics** — breakdown statistik per bot + export CSV.
-- Versi: backend `1.2.1` (`/api/health`), aplikasi `TeleCore v1.2.1`.
+- Versi: backend `1.3.0` (`/api/health`), aplikasi `TeleCore v1.3.0`.
 - **v1.2.1** — perbaikan bug halaman My Bots blank putih: form AI di modal
   pengaturan bot dereferensi `configBot` yang masih null saat halaman
   di-render. Ditambah `ErrorBoundary` agar error render menampilkan layar
   error yang bisa dipulihkan, bukan layar putih.
+
+## Yang baru di v1.3.0 — CRM + manajemen grup
+
+Semua fitur di bawah ini **gratis, tanpa paywall di mana pun** — tidak ada
+fitur berbayar di TeleCore.
+
+- **CRM — Tag** — tag berwarna di tiap pengguna (badge warna di kartu user),
+  buat tag + pilih warna, hapus tag, pasang/lepas tag dari detail pengguna,
+  filter daftar pengguna berdasarkan tag. Export CSV kini menyertakan kolom tag.
+- **CRM — Segmen** — halaman baru **Segmen** (drawer): buat segmen dengan
+  pembangun kriteria (tag, sudah-pernah-order, aktif ≤ N hari terakhir,
+  tidak-aktif > N hari, minimal jumlah pesan) + **preview jumlah anggota**
+  sebelum disimpan; klik segmen → daftar anggota; **follow-up** kirim pesan ke
+  semua anggota segmen dengan hasil terkirim/gagal; edit/hapus segmen; filter
+  daftar pengguna berdasarkan segmen. Lihat [docs/CRM.md](docs/CRM.md).
+- **CRM — Timeline & catatan** — detail pengguna kini menampilkan timeline
+  kronologis (pesan, order, catatan, tag) dan riwayat catatan (tambah/hapus).
+- **Manajemen grup** — pengaturan per grup: welcome on/off + pesan dengan
+  template `{{first_name}}` `{{chat_title}}`, anti-spam + batas flood +
+  window (detik), block links, kata terlarang (tambah/hapus), aksi pelanggaran
+  (hapus/peringatan/mute) + durasi mute. Aksi moderasi manual pada anggota
+  (mute/ban dengan durasi + alasan, unmute/unban), kartu statistik (anggota,
+  pesan hari ini/7 hari, user aktif, pengirim teratas), dan log moderasi.
+  Lihat [docs/GROUPS.md](docs/GROUPS.md).
+- **Pelajaran v1.2.1 ditegakkan** — semua modal/dialog baru di-guard
+  (`{x !== null && <Form .../>}`) agar tidak pernah dereferensi state nullable
+  saat parent di-render; ada regression test render-dengan-modal-tertutup untuk
+  Users, Groups, dan Segments (`frontend/src/test/v13.test.tsx`).
 
 ## Fitur
 
@@ -83,10 +111,16 @@ fitur berbayar di TeleCore.
   aksi, multi-step + delay), welcome message, auto-reply, keyword, command,
   history eksekusi, enable/disable per workflow, loop guard (maks 10 eksekusi
   per workflow per menit, maks 20 langkah, pesan dari bot sendiri diabaikan).
-- **Users** — daftar pengguna, profil, search/filter, notes, label,
-  block/unblock, export CSV.
-- **Groups** — info grup, pengaturan welcome/keyword filter/anti-spam/link
-  filter/flood/warning, moderation log. Aksi moderasi **hanya** berjalan bila
+- **Users** — daftar pengguna, profil, search/filter (bot, status blokir,
+  label, **tag, segmen**), notes, label, **tag berwarna, timeline, catatan
+  (tambah/hapus)**, block/unblock, export CSV (**termasuk kolom tag**).
+- **Segmen** — kelompok pengguna berdasarkan kriteria (tag, order,
+  aktivitas) dengan preview jumlah anggota, daftar anggota, dan follow-up
+  broadcast ke seluruh anggota segmen.
+- **Groups** — info grup, pengaturan welcome (template `{{first_name}}`
+  `{{chat_title}}`)/anti-spam/flood/block links/kata terlarang/aksi
+  pelanggaran + durasi mute, **aksi moderasi manual (mute/ban/unmute/unban),
+  kartu statistik, pengirim teratas,** moderation log. Aksi moderasi **hanya** berjalan bila
   bot adalah admin grup (dicek via `getChatMember`); bila bukan admin,
   aplikasi menampilkan peringatan dan tidak mengeksekusi moderasi.
 - **Scheduler** — one-time, harian, mingguan, interval, cron
@@ -124,12 +158,12 @@ TeleCore/
 │   └── migrations/     15 tabel v1 + tabel v1.1 (outgoing_webhooks,
 │                       webhook_deliveries, api_tokens) + FK + index
 ├── frontend/           React + TypeScript + Vite + Tailwind v3
-│   └── src/            13 halaman (termasuk Integrations + Logs), api client,
+│   └── src/            17 halaman (termasuk Segments, Integrations + Logs), api client,
 │                       stores (Zustand), hooks (WebSocket, notifikasi lokal),
 │                       komponen, utils (statusBar, copy)
 ├── android/            Proyek Capacitor Android (applicationId com.telecore.app)
 ├── .github/workflows/  android-build.yml (CI: backend + frontend + APK debug)
-├── docs/               ANDROID.md, SIGNING.md, MCP.md
+├── docs/               ANDROID.md, SIGNING.md, MCP.md, CRM.md, GROUPS.md
 ├── scripts/            (kosong — skrip utilitas bila diperlukan)
 ├── capacitor.config.ts, package.json (root, khusus Capacitor)
 ├── .env.example, .gitignore, LICENSE (MIT)
@@ -229,6 +263,19 @@ passphrase backup di UI, pemetaan field scheduler/command/automation, bug
 `FromRow` grup/notifikasi (kolom `type`), scheduler harian/mingguan yang
 mengabaikan jam cron, dan tombol inline keyboard dengan `url` + `callback_data`
 bersamaan (ditolak Telegram).
+
+## Hasil verifikasi frontend v1.3.0 (2026-11-25)
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `npx tsc --noEmit` (frontend) | **0 error** |
+| `npm test` / vitest (frontend) | **49 passed, 0 failed** (43 dari v1–v1.2 + 6 baru v1.3: regresi modal-tertutup Users/Groups/Segments, preview segmen, `criteriaSummary`) |
+| `npm run build` (frontend) | Lolos |
+| `npx cap sync android` | Lolos, 8 plugin Capacitor terdeteksi |
+
+Catatan: angka di atas hanya frontend. Verifikasi backend v1.3 (cargo test,
+smoke API endpoint baru) adalah tanggung jawab pekerjaan backend dan belum
+termasuk di sini; endpoint v1.3 belum diuji live terhadap backend nyata.
 
 ## Batasan yang diketahui (v1.1)
 
