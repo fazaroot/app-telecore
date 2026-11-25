@@ -1,0 +1,72 @@
+import { useEffect } from 'react'
+import { HashRouter, Route, Routes } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Layout } from './components/Layout'
+import { PinLockScreen } from './components/PinLock'
+import { usePinStore } from './stores/pin'
+import { DashboardPage } from './pages/DashboardPage'
+import { BotsPage } from './pages/BotsPage'
+import { MessagesPage } from './pages/MessagesPage'
+import { AutomationPage } from './pages/AutomationPage'
+import { UsersPage } from './pages/UsersPage'
+import { GroupsPage } from './pages/GroupsPage'
+import { SchedulerPage } from './pages/SchedulerPage'
+import { AnalyticsPage } from './pages/AnalyticsPage'
+import { NotificationsPage } from './pages/NotificationsPage'
+import { SecurityPage } from './pages/SecurityPage'
+import { SettingsPage } from './pages/SettingsPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 10_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+})
+
+export default function App() {
+  const initialized = usePinStore((s) => s.initialized)
+  const locked = usePinStore((s) => s.locked)
+  const init = usePinStore((s) => s.init)
+
+  useEffect(() => {
+    void init()
+  }, [init])
+
+  if (!initialized) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg dark:bg-darkbg">
+        <p className="text-lg font-bold text-ink dark:text-darktext">
+          Tele<span className="text-primary">Core</span>
+        </p>
+      </div>
+    )
+  }
+
+  if (locked) return <PinLockScreen />
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <HashRouter>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="bots" element={<BotsPage />} />
+            <Route path="messages" element={<MessagesPage />} />
+            <Route path="automation" element={<AutomationPage />} />
+            <Route path="users" element={<UsersPage />} />
+            <Route path="groups" element={<GroupsPage />} />
+            <Route path="scheduler" element={<SchedulerPage />} />
+            <Route path="analytics" element={<AnalyticsPage />} />
+            <Route path="notifications" element={<NotificationsPage />} />
+            <Route path="security" element={<SecurityPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="*" element={<DashboardPage />} />
+          </Route>
+        </Routes>
+      </HashRouter>
+    </QueryClientProvider>
+  )
+}

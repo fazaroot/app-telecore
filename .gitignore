@@ -1,0 +1,38 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# Android
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/*.iml
+android/.idea/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Database & secrets
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.local
+telecore.key
+backups/*.enc
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.log

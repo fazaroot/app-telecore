@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TeleCore</string>
+    <string name="title_activity_main">TeleCore</string>
+    <string name="package_name">com.telecore.app</string>
+    <string name="custom_url_scheme">com.telecore.app</string>
+</resources>
