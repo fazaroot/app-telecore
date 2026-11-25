@@ -363,6 +363,53 @@ pub struct AdminSession {
 }
 
 // ---------------------------------------------------------------------------
+// v1.1: Outgoing webhooks + personal API tokens
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OutgoingWebhook {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(serialize_with = "ser_json_str")]
+    pub events: String, // JSON array string
+    /// TIDAK PERNAH diserialisasi — secret terenkripsi AES-256-GCM.
+    #[serde(skip_serializing)]
+    pub secret_encrypted: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub enabled: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WebhookDelivery {
+    pub id: String,
+    pub webhook_id: String,
+    pub event: String,
+    #[serde(serialize_with = "ser_json_str")]
+    pub payload: String, // JSON object string
+    pub status: String,  // pending | delivered | failed
+    pub http_status: Option<i64>,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ApiToken {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    /// TIDAK PERNAH diserialisasi — SHA-256 hex dari token penuh.
+    #[serde(skip_serializing)]
+    pub token_hash: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use crate::bot::get_bot_token;
 use crate::bot::telegram::SendMessageParams;
 use crate::models::{new_id, now_rfc3339, AutomationWorkflow, MessageTemplate};
+use crate::services::outgoing_webhooks::dispatch_outgoing_event;
 use crate::state::AppState;
 
 pub const MAX_EXECUTIONS_PER_MINUTE: usize = 10;
@@ -296,6 +297,22 @@ async fn record_execution(
     .bind(duration_ms)
     .bind(now_rfc3339())
     .execute(&state.pool)
+    .await;
+
+    // --- Outgoing webhook: automation.executed (non-blocking, spawn) ---
+    dispatch_outgoing_event(
+        state,
+        "automation.executed",
+        Some(&workflow.bot_id),
+        serde_json::json!({
+            "workflow_id": workflow.id,
+            "workflow_name": workflow.name,
+            "trigger": trigger,
+            "status": status,
+            "steps_executed": steps,
+            "duration_ms": duration_ms,
+        }),
+    )
     .await;
 }
 

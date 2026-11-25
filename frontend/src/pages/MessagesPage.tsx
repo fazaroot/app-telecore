@@ -1,18 +1,22 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MessageSquare, RefreshCw, Terminal, Trash2 } from 'lucide-react'
+import { MessageSquare, RefreshCw, Search, Send, Terminal, Trash2 } from 'lucide-react'
 import { fetchBots } from '../api/bots'
 import {
   createCommand,
   deleteCommand,
+  fetchBroadcast,
   fetchCommands,
   fetchMessages,
   retryMessage,
+  searchMessages,
+  sendBroadcast,
   sendMessage,
   testCommand,
   updateCommand,
   type SendMessagePayload,
 } from '../api/messages'
+import { fetchGroups, fetchUsers } from '../api/users'
 import { useUiStore } from '../stores/settings'
 import { useLocalTemplates } from '../hooks/useLocalTemplates'
 import { Badge, Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
@@ -23,7 +27,11 @@ import type { Command } from '../types'
 const inputCls =
   'w-full rounded-lg border border-ink/15 bg-bg px-3 py-2 text-sm dark:border-darktext/15 dark:bg-darkbg'
 
-type Tab = 'compose' | 'history' | 'templates' | 'commands'
+type Tab = 'compose' | 'broadcast' | 'search' | 'history' | 'templates' | 'commands'
+
+function broadcastDone(status?: string): boolean {
+  return status === 'done' || status === 'completed' || status === 'failed'
+}
 
 export function MessagesPage() {
   const queryClient = useQueryClient()
@@ -39,6 +47,18 @@ export function MessagesPage() {
   const [cmdDescription, setCmdDescription] = useState('')
   const [cmdResponse, setCmdResponse] = useState('')
   const [cmdTestChatId, setCmdTestChatId] = useState('')
+
+  // Broadcast (v1.1)
+  const [bcBotId, setBcBotId] = useState('')
+  const [bcText, setBcText] = useState('')
+  const [bcParseMode, setBcParseMode] = useState<'MarkdownV2' | 'HTML' | 'none'>('none')
+  const [bcSelected, setBcSelected] = useState<string[]>([])
+  const [bcId, setBcId] = useState<string | number | null>(null)
+
+  // Pencarian pesan (v1.1)
+  const [searchQ, setSearchQ] = useState('')
+  const [searchSubmitted, setSearchSubmitted] = useState('')
+  const [searchBot, setSearchBot] = useState('')
 
   const { templates, addTemplate, removeTemplate } = useLocalTemplates()
 
@@ -56,6 +76,54 @@ export function MessagesPage() {
     queryKey: ['commands', filterBot],
     queryFn: () => fetchCommands(filterBot || undefined),
     enabled: tab === 'commands',
+  })
+
+  // Broadcast: daftar penerima dari user & grup yang sudah ada (per bot).
+  const bcUsersQuery = useQuery({
+    queryKey: ['broadcast-users', bcBotId],
+    queryFn: () => fetchUsers({ bot_id: bcBotId }),
+    enabled: tab === 'broadcast' && Boolean(bcBotId),
+  })
+  const bcGroupsQuery = useQuery({
+    queryKey: ['broadcast-groups', bcBotId],
+    queryFn: () => fetchGroups(bcBotId),
+    enabled: tab === 'broadcast' && Boolean(bcBotId),
+  })
+  const broadcastQuery = useQuery({
+    queryKey: ['broadcast', bcId],
+    queryFn: () => fetchBroadcast(bcId as string | number),
+    enabled: bcId !== null,
+    refetchInterval: (query) => {
+      const s = query.state.data?.status
+      return s && !broadcastDone(s) ? 1000 : false
+    },
+  })
+
+  const broadcastMutation = useMutation({
+    mutationFn: () =>
+      sendBroadcast({
+        bot_id: bcBotId,
+        text: bcText.trim(),
+        parse_mode: bcParseMode,
+        recipients: bcSelected.map((chat_id) => ({ chat_id })),
+      }),
+    onSuccess: (res) => {
+      const id = (res.broadcast_id ?? res.id) as string | number | undefined
+      if (id !== undefined && id !== null) {
+        setBcId(id)
+        pushToast(`Broadcast dimulai — ${res.total ?? bcSelected.length} penerima.`, 'success')
+      } else {
+        pushToast('Broadcast dikirim.', 'success')
+      }
+    },
+    onError: (e: Error) => pushToast(e.message, 'error'),
+  })
+
+  const searchQuery = useQuery({
+    queryKey: ['message-search', searchSubmitted, searchBot],
+    queryFn: () =>
+      searchMessages({ q: searchSubmitted, bot_id: searchBot || undefined, limit: 20 }),
+    enabled: searchSubmitted.trim().length > 0,
   })
 
   const sendMutation = useMutation({
@@ -137,10 +205,32 @@ export function MessagesPage() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'compose', label: 'Kirim' },
+    { key: 'broadcast', label: 'Broadcast' },
+    { key: 'search', label: 'Cari' },
     { key: 'history', label: 'Riwayat' },
     { key: 'templates', label: 'Template' },
     { key: 'commands', label: 'Perintah' },
   ]
+
+  // Daftar penerima broadcast: user & grup dari bot terpilih.
+  const bcRecipients: { chat_id: string; label: string; kind: 'User' | 'Grup' }[] = [
+    ...(bcUsersQuery.data ?? []).map((u) => ({
+      chat_id: String(u.telegram_id ?? u.telegram_user_id ?? u.id),
+      label: [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username || `User ${u.id}`,
+      kind: 'User' as const,
+    })),
+    ...(bcGroupsQuery.data ?? []).map((g) => ({
+      chat_id: String(g.chat_id ?? g.telegram_id ?? g.id),
+      label: g.title ?? g.name ?? `Grup ${g.id}`,
+      kind: 'Grup' as const,
+    })),
+  ]
+  const bcStatus = broadcastQuery.data
+  const bcDone = bcStatus ? broadcastDone(bcStatus.status) : false
+  const bcProgress =
+    bcStatus && bcStatus.total
+      ? Math.round((((bcStatus.sent ?? 0) + (bcStatus.failed ?? 0)) / bcStatus.total) * 100)
+      : 0
 
   return (
     <div className="space-y-4">
@@ -185,6 +275,226 @@ export function MessagesPage() {
             />
           )}
         </Card>
+      )}
+
+      {tab === 'broadcast' && (
+        <Card>
+          <h2 className="mb-3 font-bold">Kirim ke banyak penerima</h2>
+          <div className="space-y-3">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium">Bot pengirim</span>
+              <select
+                value={bcBotId}
+                onChange={(e) => {
+                  setBcBotId(e.target.value)
+                  setBcSelected([])
+                  setBcId(null)
+                }}
+                className={inputCls}
+              >
+                <option value="">Pilih bot…</option>
+                {bots.map((b) => (
+                  <option key={String(b.id)} value={String(b.id)}>
+                    {b.name ?? b.username ?? `Bot ${b.id}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {bcBotId && (
+              <>
+                {bcUsersQuery.isLoading || bcGroupsQuery.isLoading ? (
+                  <LoadingSpinner label="Memuat daftar penerima…" />
+                ) : bcRecipients.length === 0 ? (
+                  <EmptyState title="Belum ada penerima" description="Bot ini belum punya user atau grup tercatat." />
+                ) : (
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-sm font-medium">Penerima ({bcSelected.length} dipilih)</p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setBcSelected(bcRecipients.map((r) => r.chat_id))}
+                          className="text-xs font-semibold text-primary"
+                        >
+                          Pilih semua
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBcSelected([])}
+                          className="text-xs font-semibold text-ink/60 dark:text-darktext/60"
+                        >
+                          Bersihkan
+                        </button>
+                      </div>
+                    </div>
+                    <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-xl border border-ink/10 p-2 dark:border-darktext/10">
+                      {bcRecipients.map((r) => (
+                        <label key={`${r.kind}-${r.chat_id}`} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-ink/5 dark:hover:bg-darktext/5">
+                          <input
+                            type="checkbox"
+                            checked={bcSelected.includes(r.chat_id)}
+                            onChange={(e) =>
+                              setBcSelected((cur) =>
+                                e.target.checked
+                                  ? [...cur, r.chat_id]
+                                  : cur.filter((x) => x !== r.chat_id),
+                              )
+                            }
+                          />
+                          <Badge tone={r.kind === 'Grup' ? 'info' : 'default'}>{r.kind}</Badge>
+                          <span className="min-w-0 truncate">{r.label}</span>
+                          <span className="ml-auto shrink-0 font-mono text-xs text-ink/50 dark:text-darktext/50">
+                            {r.chat_id}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            <textarea
+              value={bcText}
+              onChange={(e) => setBcText(e.target.value)}
+              placeholder="Tulis pesan broadcast…"
+              rows={4}
+              className={inputCls}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={bcParseMode}
+                onChange={(e) => setBcParseMode(e.target.value as 'MarkdownV2' | 'HTML' | 'none')}
+                className={`${inputCls} !w-auto`}
+                aria-label="Mode format broadcast"
+              >
+                <option value="none">Tanpa format</option>
+                <option value="MarkdownV2">MarkdownV2</option>
+                <option value="HTML">HTML</option>
+              </select>
+              <button
+                type="button"
+                disabled={!bcBotId || bcSelected.length === 0 || !bcText.trim() || broadcastMutation.isPending}
+                onClick={() => broadcastMutation.mutate()}
+                className="flex items-center gap-1 rounded-full bg-primary px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                <Send className="h-4 w-4" />
+                {broadcastMutation.isPending ? 'Mengirim…' : `Kirim ke ${bcSelected.length} penerima`}
+              </button>
+            </div>
+            {bcStatus && (
+              <div className="rounded-xl border border-ink/10 p-3 dark:border-darktext/10">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-semibold">
+                    Status: {bcStatus.status ?? '—'}
+                  </span>
+                  <span>
+                    {bcStatus.sent ?? 0} terkirim · {bcStatus.failed ?? 0} gagal / {bcStatus.total ?? 0}
+                  </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-ink/10 dark:bg-darktext/10">
+                  <div
+                    className="h-full bg-primary transition-all"
+                    style={{ width: `${bcProgress}%` }}
+                  />
+                </div>
+                {!bcDone && <p className="mt-2 text-xs text-ink/50 dark:text-darktext/50">Memperbarui progress tiap 1 detik…</p>}
+                {bcDone && (bcStatus.results ?? []).length > 0 && (
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead>
+                        <tr className="text-ink/60 dark:text-darktext/60">
+                          <th className="py-1 pr-2 font-medium">Chat ID</th>
+                          <th className="py-1 pr-2 font-medium">Status</th>
+                          <th className="py-1 font-medium">Error</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(bcStatus.results ?? []).map((r, i) => (
+                          <tr key={`${r.chat_id ?? i}`} className="border-t border-ink/10 dark:border-darktext/10">
+                            <td className="py-1.5 pr-2 font-mono text-xs">{r.chat_id ?? '—'}</td>
+                            <td className="py-1.5 pr-2">
+                              <Badge tone={r.status === 'failed' ? 'danger' : 'success'}>{r.status ?? '—'}</Badge>
+                            </td>
+                            <td className="py-1.5 text-xs text-danger">{r.error ?? ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {tab === 'search' && (
+        <div className="space-y-3">
+          <Card>
+            <div className="flex flex-wrap gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink/40 dark:text-darktext/40" />
+                <input
+                  value={searchQ}
+                  onChange={(e) => setSearchQ(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') setSearchSubmitted(searchQ.trim())
+                  }}
+                  placeholder="Cari isi pesan…"
+                  className={`${inputCls} !pl-9`}
+                />
+              </div>
+              <select
+                value={searchBot}
+                onChange={(e) => setSearchBot(e.target.value)}
+                className={`${inputCls} !w-auto`}
+                aria-label="Filter bot pencarian"
+              >
+                <option value="">Semua bot</option>
+                {bots.map((b) => (
+                  <option key={String(b.id)} value={String(b.id)}>
+                    {b.name ?? b.username ?? `Bot ${b.id}`}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={!searchQ.trim()}
+                onClick={() => setSearchSubmitted(searchQ.trim())}
+                className="rounded-full bg-primary px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                Cari
+              </button>
+            </div>
+          </Card>
+          {searchSubmitted.trim().length > 0 && (
+            <>
+              {searchQuery.isLoading ? (
+                <LoadingSpinner label="Mencari pesan…" />
+              ) : searchQuery.isError ? (
+                <ErrorState message={(searchQuery.error as Error).message} onRetry={() => void searchQuery.refetch()} />
+              ) : (searchQuery.data ?? []).length === 0 ? (
+                <EmptyState title="Tidak ada hasil" description={`Tidak ada pesan yang cocok dengan "${searchSubmitted}".`} />
+              ) : (
+                (searchQuery.data ?? []).map((m) => (
+                  <Card key={String(m.id)}>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge tone={m.direction === 'in' || m.direction === 'inbound' ? 'info' : 'success'}>
+                        {m.direction === 'in' || m.direction === 'inbound' ? 'Masuk' : 'Keluar'}
+                      </Badge>
+                      <Badge tone={m.status === 'failed' ? 'danger' : 'default'}>{m.status ?? '—'}</Badge>
+                      <span className="text-xs text-ink/50 dark:text-darktext/50">
+                        chat {m.chat_id ?? '—'}
+                        {m.created_at ? ` · ${new Date(m.created_at).toLocaleString('id-ID')}` : ''}
+                      </span>
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm">{m.text ?? m.content ?? '(media tanpa teks)'}</p>
+                  </Card>
+                ))
+              )}
+            </>
+          )}
+        </div>
       )}
 
       {tab === 'history' && (

@@ -13,7 +13,8 @@ use crate::bot::telegram::{SendMediaParams, SendMessageParams};
 use crate::error::{AppError, AppResult, Envelope};
 use crate::models::{new_id, now_rfc3339, Message, Paginated, Pagination};
 use crate::services::log_activity;
-use crate::state::AppState;
+use crate::services::{lookup_template_vars, render_template_vars, TemplateVars};
+use crate::state::{AppState, BroadcastRecipientResult, BroadcastStatus};
 
 // ---------------------------------------------------------------------------
 // DTO + validasi (pure, diuji unit)
@@ -330,9 +331,23 @@ pub async fn message_history(
 
 pub async fn send_message(
     State(state): State<AppState>,
-    Json(req): Json<SendMessageRequest>,
+    Json(mut req): Json<SendMessageRequest>,
 ) -> AppResult<Json<Envelope<Message>>> {
     validate_send_message(&req)?;
+    // Template variables v1.1: render {{first_name}} / {{username}} /
+    // {{chat_title}} dari data penerima di DB (hanya bila teks mengandung
+    // placeholder, agar pesan biasa tidak kena query DB tambahan).
+    if req
+        .text
+        .as_ref()
+        .map(|t| t.contains("{{"))
+        .unwrap_or(false)
+    {
+        let vars = lookup_template_vars(&state, &req.bot_id, req.chat_id).await;
+        if let Some(text) = req.text.take() {
+            req.text = Some(render_template_vars(&text, &vars));
+        }
+    }
     let token = get_bot_token(&state, &req.bot_id).await?;
     let parse_mode = req.parse_mode.clone();
 
@@ -717,6 +732,261 @@ pub async fn retry_message(
     )
     .await;
     Ok(Envelope::ok(updated))
+}
+
+// ---------------------------------------------------------------------------
+// v1.1: Search + template preview + broadcast
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SearchMessagesQuery {
+    pub q: Option<String>,
+    pub bot_id: Option<String>,
+    /// Default 50, maks 200.
+    pub limit: Option<i64>,
+}
+
+/// Cari pesan berdasarkan isi teks (LIKE, case-insensitive) + filter bot_id.
+/// `q` wajib tidak kosong.
+pub async fn search_messages(
+    State(state): State<AppState>,
+    Query(q): Query<SearchMessagesQuery>,
+) -> AppResult<Json<Envelope<Vec<Message>>>> {
+    let query = q.q.as_deref().unwrap_or("").trim();
+    if query.is_empty() {
+        return Err(AppError::Validation(
+            "parameter q tidak boleh kosong".to_string(),
+        ));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let pattern = format!("%{query}%");
+    // QueryBuilder: placeholder `?` hanya boleh muncul via push_bind,
+    // bukan sebagai literal di string SQL awal.
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT * FROM messages WHERE LOWER(content) LIKE LOWER(",
+    );
+    qb.push_bind(pattern);
+    qb.push(")");
+    if let Some(b) = &q.bot_id {
+        qb.push(" AND bot_id = ").push_bind(b);
+    }
+    qb.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
+    let items = qb.build_query_as::<Message>().fetch_all(&state.pool).await?;
+    Ok(Envelope::ok(items))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewTemplateRequest {
+    pub text: String,
+    pub first_name: Option<String>,
+    pub username: Option<String>,
+    pub chat_title: Option<String>,
+}
+
+/// Preview render template variables tanpa mengirim pesan.
+pub async fn preview_template(
+    Json(req): Json<PreviewTemplateRequest>,
+) -> Json<Envelope<serde_json::Value>> {
+    let vars = TemplateVars::new(req.first_name, req.username, req.chat_title);
+    Envelope::ok(json!({"rendered": render_template_vars(&req.text, &vars)}))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BroadcastRecipient {
+    #[serde(deserialize_with = "crate::models::de_chat_id")]
+    pub chat_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BroadcastRequest {
+    pub bot_id: String,
+    pub text: String,
+    #[serde(default, deserialize_with = "crate::models::de_parse_mode")]
+    pub parse_mode: Option<String>,
+    pub recipients: Vec<BroadcastRecipient>,
+}
+
+/// Broadcast: kirim pesan ke banyak chat. Pengiriman berjalan di background
+/// task (sequential, jeda 100ms antar chat); respons langsung mengembalikan
+/// `broadcast_id` + `total`, status dipolling via
+/// `GET /api/messages/broadcast/:id`. Status hanya in-memory (hilang saat
+/// restart).
+pub async fn create_broadcast(
+    State(state): State<AppState>,
+    Json(req): Json<BroadcastRequest>,
+) -> AppResult<Json<Envelope<serde_json::Value>>> {
+    if req.bot_id.trim().is_empty() {
+        return Err(AppError::Validation("bot_id tidak boleh kosong".to_string()));
+    }
+    if req.text.trim().is_empty() {
+        return Err(AppError::Validation("text tidak boleh kosong".to_string()));
+    }
+    if req.recipients.is_empty() {
+        return Err(AppError::Validation(
+            "recipients tidak boleh kosong".to_string(),
+        ));
+    }
+    if req.recipients.len() > 1000 {
+        return Err(AppError::Validation(
+            "recipients maksimal 1000 chat per broadcast".to_string(),
+        ));
+    }
+    if let Some(mode) = &req.parse_mode {
+        if !matches!(mode.as_str(), "Markdown" | "MarkdownV2" | "HTML") {
+            return Err(AppError::Validation(
+                "parse_mode harus Markdown, MarkdownV2, atau HTML".to_string(),
+            ));
+        }
+    }
+    // Pastikan bot ada + token bisa didekripsi SEBELUM task background jalan.
+    let _ = get_bot_token(&state, &req.bot_id).await?;
+
+    let broadcast_id = new_id();
+    let total = req.recipients.len() as i64;
+    {
+        let mut registry = state.broadcasts.lock().unwrap();
+        registry.insert(
+            broadcast_id.clone(),
+            BroadcastStatus {
+                broadcast_id: broadcast_id.clone(),
+                bot_id: req.bot_id.clone(),
+                total,
+                sent: 0,
+                failed: 0,
+                status: "running".to_string(),
+                results: Vec::new(),
+                created_at: now_rfc3339(),
+            },
+        );
+    }
+
+    let task_state = state.clone();
+    let task_broadcast_id = broadcast_id.clone();
+    tokio::spawn(async move {
+        run_broadcast(task_state, task_broadcast_id, req).await;
+    });
+
+    Ok(Envelope::ok(json!({
+        "broadcast_id": broadcast_id,
+        "total": total,
+        "status": "running",
+    })))
+}
+
+async fn run_broadcast(state: AppState, broadcast_id: String, req: BroadcastRequest) {
+    let token = match get_bot_token(&state, &req.bot_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            // Token gagal: semua penerima gagal dengan error yang sama.
+            let mut registry = state.broadcasts.lock().unwrap();
+            if let Some(entry) = registry.get_mut(&broadcast_id) {
+                for r in &req.recipients {
+                    entry.results.push(BroadcastRecipientResult {
+                        chat_id: r.chat_id,
+                        status: "failed".to_string(),
+                        error: Some(e.to_string()),
+                    });
+                }
+                entry.failed = req.recipients.len() as i64;
+                entry.status = "done".to_string();
+            }
+            return;
+        }
+    };
+    for (i, recipient) in req.recipients.iter().enumerate() {
+        if i > 0 {
+            // Rate limit: jeda 100ms antar chat.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Template variables per penerima.
+        let text = if req.text.contains("{{") {
+            let vars = lookup_template_vars(&state, &req.bot_id, recipient.chat_id).await;
+            render_template_vars(&req.text, &vars)
+        } else {
+            req.text.clone()
+        };
+        let sent = state
+            .telegram
+            .send_message(
+                &token,
+                &SendMessageParams {
+                    chat_id: recipient.chat_id,
+                    text: text.clone(),
+                    parse_mode: req.parse_mode.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let (status, error) = match &sent {
+            Ok(tg) => {
+                let _ = save_outbound_message(
+                    &state,
+                    &req.bot_id,
+                    recipient.chat_id,
+                    "text",
+                    Some(text),
+                    None,
+                    "sent",
+                    Some(tg.message_id),
+                    req.parse_mode.as_deref(),
+                    None,
+                )
+                .await;
+                ("sent", None)
+            }
+            Err(e) => {
+                let _ = save_outbound_message(
+                    &state,
+                    &req.bot_id,
+                    recipient.chat_id,
+                    "text",
+                    Some(text),
+                    None,
+                    "failed",
+                    None,
+                    req.parse_mode.as_deref(),
+                    Some(e.to_string()),
+                )
+                .await;
+                ("failed", Some(e.to_string()))
+            }
+        };
+        let mut registry = state.broadcasts.lock().unwrap();
+        if let Some(entry) = registry.get_mut(&broadcast_id) {
+            if status == "sent" {
+                entry.sent += 1;
+            } else {
+                entry.failed += 1;
+            }
+            entry.results.push(BroadcastRecipientResult {
+                chat_id: recipient.chat_id,
+                status: status.to_string(),
+                error,
+            });
+        }
+    }
+    let mut registry = state.broadcasts.lock().unwrap();
+    if let Some(entry) = registry.get_mut(&broadcast_id) {
+        entry.status = "done".to_string();
+    }
+    state.hub.publish(
+        "activity",
+        json!({"action": "broadcast_completed", "broadcast_id": broadcast_id}),
+    );
+}
+
+/// Polling status broadcast (in-memory; 404 bila id tidak dikenal — mis.
+/// server sudah restart setelah broadcast dibuat).
+pub async fn get_broadcast_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Envelope<BroadcastStatus>>> {
+    let registry = state.broadcasts.lock().unwrap();
+    registry
+        .get(&id)
+        .cloned()
+        .map(Envelope::ok)
+        .ok_or_else(|| AppError::NotFound(format!("broadcast {id} tidak ditemukan")))
 }
 
 #[cfg(test)]

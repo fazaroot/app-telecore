@@ -35,7 +35,7 @@ export function PinLockScreen() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-bg px-6 dark:bg-darkbg">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-bg px-6 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] dark:bg-darkbg">
       <Lock className="mb-4 h-12 w-12 text-primary" />
       <h1 className="text-xl font-bold text-ink dark:text-darktext">TeleCore terkunci</h1>
       <p className="mt-1 text-center text-sm text-ink/60 dark:text-darktext/60">

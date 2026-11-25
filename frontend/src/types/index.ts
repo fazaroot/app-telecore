@@ -286,3 +286,99 @@ export interface LocalTemplate {
   parse_mode: 'MarkdownV2' | 'HTML' | 'none'
   created_at: string
 }
+
+// --- v1.1: Integrations / MCP / Outgoing Webhooks ---
+
+export const WEBHOOK_EVENTS = [
+  'message.inbound',
+  'automation.executed',
+  'bot.disconnected',
+  'scheduled_task.completed',
+] as const
+
+export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number]
+
+export interface OutgoingWebhook {
+  id: string | number
+  name?: string
+  url?: string
+  events?: string[]
+  is_enabled?: boolean
+  enabled?: boolean
+  secret?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface WebhookDelivery {
+  id: string | number
+  webhook_id?: string | number
+  event?: string
+  status?: string
+  response_status?: number | null
+  status_code?: number | null
+  http_status?: number | null
+  attempts?: number
+  error?: string | null
+  last_error?: string | null
+  created_at?: string
+  delivered_at?: string | null
+}
+
+// --- v1.1: Personal API tokens ---
+
+export interface PersonalToken {
+  id: string | number
+  name?: string
+  prefix?: string
+  token?: string
+  created_at?: string
+  last_used_at?: string | null
+}
+
+// --- v1.1: Broadcast ---
+
+export interface BroadcastRecipientResult {
+  chat_id?: string | number
+  status?: string
+  error?: string | null
+}
+
+export interface BroadcastStatus {
+  id?: string | number
+  broadcast_id?: string | number
+  status?: string
+  total?: number
+  sent?: number
+  failed?: number
+  results?: BroadcastRecipientResult[]
+}
+
+// --- v1.1: Per-bot analytics ---
+
+export interface PerBotStat {
+  bot_id?: string | number
+  bot_name?: string
+  name?: string
+  username?: string
+  messages_in?: number
+  messages_out?: number
+  active_users?: number
+  new_users?: number
+  automations?: number
+  automation_runs?: number
+  failed?: number
+  failed_requests?: number
+}
+
+// --- v1.1: Live logs ---
+
+export interface LogEntry {
+  id?: string | number
+  timestamp?: string
+  created_at?: string
+  level?: string
+  message?: string
+  source?: string
+  [key: string]: unknown
+}

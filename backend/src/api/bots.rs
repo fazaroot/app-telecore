@@ -19,6 +19,7 @@ use crate::models::{
 };
 use crate::security::Crypto;
 use crate::services::log_activity;
+use crate::services::outgoing_webhooks::dispatch_outgoing_event;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -353,6 +354,14 @@ pub async fn disconnect_bot(
         "bot_status",
         json!({"bot_id": id, "status": "disconnected"}),
     );
+    // --- Outgoing webhook: bot.disconnected (non-blocking, spawn) ---
+    dispatch_outgoing_event(
+        &state,
+        "bot.disconnected",
+        Some(&id),
+        json!({"bot_name": bot.name}),
+    )
+    .await;
     Ok(Envelope::ok(bot))
 }
 

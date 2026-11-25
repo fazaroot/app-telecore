@@ -5,13 +5,17 @@
 //! via API. Rotasi dilakukan dengan mengubah env lalu restart server — ini
 //! disengaja agar kunci tidak bisa dicuri lewat endpoint.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{AppError, AppResult, Envelope};
-use crate::models::{now_rfc3339, AdminSession};
+use crate::models::{new_id, now_rfc3339, AdminSession, ApiToken};
 use crate::security::crypto::{generate_salt_hex, hash_pin};
+use crate::services::tokens::generate_personal_token;
 use crate::state::AppState;
 
 const ADMIN_SESSION_ID: &str = "admin";
@@ -147,4 +151,72 @@ pub async fn list_sessions(
     .fetch_all(&state.pool)
     .await?;
     Ok(Envelope::ok(sessions))
+}
+
+// ---------------------------------------------------------------------------
+// Personal API tokens (v1.1)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTokenRequest {
+    pub name: String,
+}
+
+/// Daftar token — TANPA hash dan TANPA token penuh (lihat models.rs:
+/// `token_hash` di-skip dari serialisasi).
+pub async fn list_tokens(
+    State(state): State<AppState>,
+) -> AppResult<Json<Envelope<Vec<ApiToken>>>> {
+    let tokens = sqlx::query_as::<_, ApiToken>(
+        "SELECT * FROM api_tokens ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Envelope::ok(tokens))
+}
+
+/// Buat token personal. Token PENUH hanya dikembalikan SEKALI di respons ini.
+/// Simpan segera — setelah respons ini token tidak bisa diambil lagi.
+pub async fn create_token(
+    State(state): State<AppState>,
+    Json(req): Json<CreateTokenRequest>,
+) -> AppResult<Json<Envelope<serde_json::Value>>> {
+    if req.name.trim().is_empty() {
+        return Err(AppError::Validation("name tidak boleh kosong".to_string()));
+    }
+    let (token, prefix, token_hash) = generate_personal_token();
+    let now = now_rfc3339();
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO api_tokens (id, name, prefix, token_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(req.name.trim())
+    .bind(&prefix)
+    .bind(&token_hash)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
+    Ok(Envelope::ok(json!({
+        "id": id,
+        "name": req.name.trim(),
+        "prefix": prefix,
+        "token": token,
+        "created_at": now,
+        "note": "Token penuh hanya ditampilkan sekali di respons ini — simpan sekarang. Token dipakai sebagai header X-API-Key (pengganti API key env).",
+    })))
+}
+
+pub async fn delete_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Envelope<serde_json::Value>>> {
+    let deleted = sqlx::query("DELETE FROM api_tokens WHERE id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("token {id} tidak ditemukan")));
+    }
+    Ok(Envelope::ok(json!({"deleted": true, "id": id})))
 }

@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { exportAnalytics, fetchAnalyticsSummary } from '../api/misc'
+import { exportAnalytics, exportPerBotAnalyticsCsv, fetchAnalyticsSummary, fetchPerBotAnalytics } from '../api/misc'
 import { useUiStore } from '../stores/settings'
 import { Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
 
@@ -36,6 +36,25 @@ export function AnalyticsPage() {
     queryKey: ['analytics', 'summary', from, to],
     queryFn: () => fetchAnalyticsSummary(from, to),
   })
+
+  const [exportingPerBot, setExportingPerBot] = useState(false)
+  const perBotQuery = useQuery({
+    queryKey: ['analytics', 'per-bot', from, to],
+    queryFn: () => fetchPerBotAnalytics(from, to),
+  })
+  const perBot = perBotQuery.data ?? []
+
+  const handleExportPerBot = async () => {
+    setExportingPerBot(true)
+    try {
+      await exportPerBotAnalyticsCsv(from, to)
+      pushToast('Statistik per bot diekspor sebagai CSV.', 'success')
+    } catch (e) {
+      pushToast((e as Error).message, 'error')
+    } finally {
+      setExportingPerBot(false)
+    }
+  }
 
   const data = query.data
   const daily = useMemo(
@@ -204,6 +223,59 @@ export function AnalyticsPage() {
                 <Bar dataKey="jumlah" fill="#7187ED" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-bold">Statistik per Bot</h2>
+          <button
+            type="button"
+            onClick={handleExportPerBot}
+            disabled={exportingPerBot}
+            className="flex items-center gap-1 rounded-full bg-primary/10 px-3 py-2 text-sm font-semibold text-primary disabled:opacity-50"
+          >
+            <Download className="h-4 w-4" /> {exportingPerBot ? 'Mengekspor…' : 'Export CSV'}
+          </button>
+        </div>
+        {perBotQuery.isLoading ? (
+          <LoadingSpinner label="Memuat statistik per bot…" />
+        ) : perBotQuery.isError ? (
+          <ErrorState message={(perBotQuery.error as Error).message} onRetry={() => void perBotQuery.refetch()} />
+        ) : perBot.length === 0 ? (
+          <EmptyState title="Belum ada data per bot" description="Statistik per bot muncul setelah ada aktivitas dalam rentang tanggal ini." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[560px] text-left text-sm">
+              <thead>
+                <tr className="text-ink/60 dark:text-darktext/60">
+                  <th className="py-1.5 pr-2 font-medium">Bot</th>
+                  <th className="py-1.5 pr-2 font-medium">Masuk</th>
+                  <th className="py-1.5 pr-2 font-medium">Keluar</th>
+                  <th className="py-1.5 pr-2 font-medium">User aktif</th>
+                  <th className="py-1.5 pr-2 font-medium">User baru</th>
+                  <th className="py-1.5 pr-2 font-medium">Automation</th>
+                  <th className="py-1.5 font-medium">Gagal</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perBot.map((b, i) => (
+                  <tr key={String(b.bot_id ?? i)} className="border-t border-ink/10 dark:border-darktext/10">
+                    <td className="py-2 pr-2 font-medium">
+                      {b.bot_name ?? b.name ?? b.username ?? `Bot ${b.bot_id ?? ''}`}
+                      {b.username && (b.bot_name ?? b.name) ? ` (@${b.username})` : ''}
+                    </td>
+                    <td className="py-2 pr-2">{b.messages_in ?? 0}</td>
+                    <td className="py-2 pr-2">{b.messages_out ?? 0}</td>
+                    <td className="py-2 pr-2">{b.active_users ?? 0}</td>
+                    <td className="py-2 pr-2">{b.new_users ?? 0}</td>
+                    <td className="py-2 pr-2">{b.automations ?? b.automation_runs ?? 0}</td>
+                    <td className="py-2 text-danger">{b.failed ?? b.failed_requests ?? 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Card>

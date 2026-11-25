@@ -1,5 +1,13 @@
 import { apiDownload, apiRequest, asArray } from './client'
-import type { AnalyticsSummary, AppSettings, Backup, NotificationItem, SecurityStatus } from '../types'
+import type {
+  AnalyticsSummary,
+  AppSettings,
+  Backup,
+  NotificationItem,
+  PerBotStat,
+  PersonalToken,
+  SecurityStatus,
+} from '../types'
 
 type RawRecord = Record<string, any>
 
@@ -96,4 +104,33 @@ export async function fetchAppSettings(): Promise<AppSettings> {
 
 export async function updateAppSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
   return apiRequest<AppSettings>('/api/settings', { method: 'PUT', body: settings })
+}
+
+// --- v1.1: Personal API tokens ---
+
+export async function fetchPersonalTokens(): Promise<PersonalToken[]> {
+  const data = await apiRequest<unknown>('/api/security/tokens')
+  return asArray<PersonalToken>(data, ['tokens', 'items', 'data'])
+}
+
+export async function createPersonalToken(name: string): Promise<PersonalToken> {
+  return apiRequest<PersonalToken>('/api/security/tokens', { method: 'POST', body: { name } })
+}
+
+export async function revokePersonalToken(id: string | number): Promise<void> {
+  await apiRequest(`/api/security/tokens/${id}`, { method: 'DELETE' })
+}
+
+// --- v1.1: Per-bot analytics ---
+
+export async function fetchPerBotAnalytics(from?: string, to?: string): Promise<PerBotStat[]> {
+  const data = await apiRequest<unknown>('/api/analytics/per-bot', { query: { from, to } })
+  return asArray<PerBotStat>(data, ['bots', 'per_bot', 'items', 'data'])
+}
+
+export async function exportPerBotAnalyticsCsv(from?: string, to?: string): Promise<void> {
+  await apiDownload('/api/analytics/per-bot/export', 'telecore-analytics-per-bot.csv', {
+    from,
+    to,
+  })
 }

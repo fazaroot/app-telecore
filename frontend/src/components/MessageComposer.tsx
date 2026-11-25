@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { Paperclip, Send, X } from 'lucide-react'
 import type { Bot, LocalTemplate } from '../types'
+import { previewMessage } from '../api/messages'
 import { KeyboardBuilder, buildKeyboardPayload, type KeyboardRows } from './KeyboardBuilder'
 
 export interface ComposerValue {
@@ -57,6 +58,13 @@ export function MessageComposer({
   const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [showPreview, setShowPreview] = useState(true)
   const [templateName, setTemplateName] = useState('')
+  // Preview variabel template ({{first_name}}, {{username}}, {{chat_title}})
+  const [previewFirstName, setPreviewFirstName] = useState('')
+  const [previewUsername, setPreviewUsername] = useState('')
+  const [previewChatTitle, setPreviewChatTitle] = useState('')
+  const [renderedPreview, setRenderedPreview] = useState<string | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+  const [previewError, setPreviewError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const chatIdValid = /^-?\d+$/.test(chatId.trim())
@@ -224,6 +232,67 @@ export function MessageComposer({
           <p className="whitespace-pre-wrap text-sm">{text}</p>
         </div>
       )}
+
+      {/* Preview variabel template via backend ({{first_name}}, {{username}}, {{chat_title}}). */}
+      <div className="rounded-xl border border-ink/10 p-3 dark:border-darktext/10">
+        <p className="mb-2 text-sm font-semibold">Preview variabel template</p>
+        <p className="mb-2 text-xs text-ink/50 dark:text-darktext/50">
+          Variabel yang didukung: {'{{first_name}}'}, {'{{username}}'}, {'{{chat_title}}'}. Isi contoh
+          nilai di bawah lalu tekan Preview — hasil render berasal dari server.
+        </p>
+        <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <input
+            value={previewFirstName}
+            onChange={(e) => setPreviewFirstName(e.target.value)}
+            placeholder="Nama depan (first_name)"
+            className={inputCls}
+          />
+          <input
+            value={previewUsername}
+            onChange={(e) => setPreviewUsername(e.target.value)}
+            placeholder="Username"
+            className={inputCls}
+          />
+          <input
+            value={previewChatTitle}
+            onChange={(e) => setPreviewChatTitle(e.target.value)}
+            placeholder="Judul chat (chat_title)"
+            className={inputCls}
+          />
+        </div>
+        <button
+          type="button"
+          disabled={!text.trim() || previewBusy}
+          onClick={async () => {
+            setPreviewBusy(true)
+            setPreviewError('')
+            try {
+              const rendered = await previewMessage({
+                text: text.trim(),
+                first_name: previewFirstName.trim() || undefined,
+                username: previewUsername.trim() || undefined,
+                chat_title: previewChatTitle.trim() || undefined,
+              })
+              setRenderedPreview(rendered)
+            } catch (e) {
+              setPreviewError((e as Error).message)
+              setRenderedPreview(null)
+            } finally {
+              setPreviewBusy(false)
+            }
+          }}
+          className="rounded-full bg-primary/10 px-3 py-1.5 text-sm font-semibold text-primary disabled:opacity-50"
+        >
+          {previewBusy ? 'Memproses…' : 'Preview'}
+        </button>
+        {previewError && <p className="mt-2 text-sm text-danger">{previewError}</p>}
+        {renderedPreview !== null && (
+          <div className="mt-2 rounded-xl bg-bg p-3 dark:bg-darkbg">
+            <p className="mb-1 text-xs font-semibold text-ink/50 dark:text-darktext/50">Hasil render server</p>
+            <p className="whitespace-pre-wrap text-sm">{renderedPreview}</p>
+          </div>
+        )}
+      </div>
 
       <div>
         <p className="mb-2 text-sm font-semibold text-ink dark:text-darktext">Keyboard (opsional)</p>

@@ -10,6 +10,7 @@ mod bot;
 mod config;
 mod db;
 mod error;
+mod logging;
 mod middleware;
 mod models;
 mod scheduler;
@@ -18,24 +19,37 @@ mod services;
 mod state;
 mod websocket;
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use bot::telegram::TelegramClient;
 use config::Config;
+use logging::LogLayer;
 use security::Crypto;
 use state::AppState;
+use websocket::Hub;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
 
-    // Logging: filter dari RUST_LOG (default info).
+    // Infrastruktur live logs (v1.1) dibuat SEBELUM subscriber tracing,
+    // agar layer log memakai handle yang sama dengan AppState.
+    let (log_tx, _log_rx) = broadcast::channel(200);
+    let log_ring = Arc::new(Mutex::new(VecDeque::new()));
+    let hub = Hub::new();
+    let log_layer = LogLayer::new(log_tx.clone(), log_ring.clone(), hub.clone());
+
+    // Logging: filter dari RUST_LOG (default info). Layer fmt tetap jalan;
+    // LogLayer hanya menambah sink (ring buffer + broadcast + WS hub).
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(&config.rust_log))
         .with(tracing_subscriber::fmt::layer())
+        .with(log_layer)
         .init();
 
     let crypto = Arc::new(Crypto::load_or_generate()?);
@@ -47,7 +61,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Database siap: {}", config.db_path());
 
     let telegram = TelegramClient::new()?;
-    let state = AppState::new(pool, config.clone(), crypto, telegram);
+    let state = AppState::new_with_log(
+        pool,
+        config.clone(),
+        crypto,
+        telegram,
+        hub,
+        log_tx,
+        log_ring,
+    );
 
     // Scheduler: loop tiap 10 detik.
     tokio::spawn(scheduler::scheduler_loop(state.clone()));

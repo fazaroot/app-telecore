@@ -10,6 +10,8 @@ import {
   Menu,
   MessageSquare,
   Moon,
+  Plug,
+  ScrollText,
   Settings,
   Shield,
   Sun,
@@ -32,6 +34,8 @@ const NAV_ITEMS = [
   { to: '/groups', label: 'Groups', icon: UsersRound },
   { to: '/scheduler', label: 'Scheduler', icon: CalendarClock },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/integrations', label: 'Integrations', icon: Plug },
+  { to: '/logs', label: 'Logs', icon: ScrollText },
   { to: '/notifications', label: 'Notifications', icon: Bell },
   { to: '/security', label: 'Security', icon: Shield },
   { to: '/settings', label: 'Settings', icon: Settings },
@@ -88,7 +92,9 @@ export function Layout() {
 
   return (
     <div className="min-h-screen bg-bg text-ink dark:bg-darkbg dark:text-darktext">
-      <header className="sticky top-0 z-40 flex items-center justify-between border-b border-ink/10 bg-surface/90 px-4 py-3 backdrop-blur dark:border-darktext/10 dark:bg-darksurface/90">
+      {/* pt memakai safe-area-inset-top agar header tidak tertutup status bar
+          saat overlaysWebView aktif; bernilai 0 bila overlay sudah dimatikan. */}
+      <header className="sticky top-0 z-40 flex items-center justify-between border-b border-ink/10 bg-surface/90 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur dark:border-darktext/10 dark:bg-darksurface/90">
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -139,7 +145,7 @@ export function Layout() {
               onClick={() => setDrawerOpen(false)}
             />
             <motion.nav
-              className="fixed inset-y-0 left-0 z-50 w-72 overflow-y-auto bg-surface p-4 dark:bg-darksurface"
+              className="fixed inset-y-0 left-0 z-50 w-72 overflow-y-auto bg-surface p-4 pb-[env(safe-area-inset-bottom)] pt-[max(1rem,env(safe-area-inset-top))] dark:bg-darksurface"
               initial={{ x: -300 }}
               animate={{ x: 0 }}
               exit={{ x: -300 }}
@@ -178,7 +184,7 @@ export function Layout() {
                 ))}
               </div>
               <p className="mt-6 px-3 text-xs text-ink/50 dark:text-darktext/50">
-                TeleCore v1.0.0 — Telegram Bot Control Center
+                TeleCore v1.1.0 — Telegram Bot Control Center
               </p>
             </motion.nav>
           </>

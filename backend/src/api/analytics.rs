@@ -177,6 +177,192 @@ pub async fn summary(
     Ok(Envelope::ok(data))
 }
 
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct PerBotRow {
+    pub bot_id: String,
+    pub bot_name: String,
+    pub messages_in: i64,
+    pub messages_out: i64,
+    pub active_users: i64,
+    pub new_users: i64,
+    pub automations_run: i64,
+    /// Pesan gagal + eksekusi automation gagal dalam rentang.
+    pub failed: i64,
+}
+
+/// Hitung statistik per bot dari tabel yang sudah ada.
+/// - `messages_in/out`: tabel `messages` (direction).
+/// - `active_users`: distinct `from_user_id` pesan inbound.
+/// - `new_users`: baris `bot_users` yang dibuat dalam rentang.
+/// - `automations_run`: semua eksekusi di `automation_executions`.
+/// - `failed`: pesan `status='failed'` + eksekusi automation `status='failed'`.
+pub async fn compute_per_bot(
+    state: &AppState,
+    from: &Option<String>,
+    to: &Option<String>,
+) -> AppResult<Vec<PerBotRow>> {
+    let bots = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, name FROM bots ORDER BY created_at",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let mut out = Vec::new();
+    for (bot_id, bot_name) in bots {
+        let messages_in = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM messages WHERE direction = 'inbound'",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let messages_out = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM messages WHERE direction = 'outbound'",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let failed_messages = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM messages WHERE status = 'failed'",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let active_users = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(DISTINCT from_user_id) FROM messages \
+                 WHERE direction = 'inbound' AND from_user_id IS NOT NULL",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let new_users = {
+            let mut qb =
+                sqlx::QueryBuilder::new("SELECT COUNT(*) FROM bot_users WHERE 1=1");
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let automations_run = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM automation_executions WHERE 1=1",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        let failed_automations = {
+            let mut qb = sqlx::QueryBuilder::new(
+                "SELECT COUNT(*) FROM automation_executions WHERE status = 'failed'",
+            );
+            qb.push(" AND bot_id = ").push_bind(&bot_id);
+            if let Some(f) = from {
+                qb.push(" AND created_at >= ").push_bind(f);
+            }
+            if let Some(t) = to {
+                qb.push(" AND created_at <= ").push_bind(t);
+            }
+            qb.build_query_scalar::<i64>().fetch_one(&state.pool).await?
+        };
+        out.push(PerBotRow {
+            bot_id,
+            bot_name,
+            messages_in,
+            messages_out,
+            active_users,
+            new_users,
+            automations_run,
+            failed: failed_messages + failed_automations,
+        });
+    }
+    Ok(out)
+}
+
+pub async fn per_bot(
+    State(state): State<AppState>,
+    Query(q): Query<SummaryQuery>,
+) -> AppResult<Json<Envelope<Vec<PerBotRow>>>> {
+    let rows = compute_per_bot(&state, &q.from, &q.to).await?;
+    Ok(Envelope::ok(rows))
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Export per-bot analytics sebagai CSV.
+pub async fn per_bot_export(
+    State(state): State<AppState>,
+    Query(q): Query<SummaryQuery>,
+) -> AppResult<Response> {
+    let rows = compute_per_bot(&state, &q.from, &q.to).await?;
+    let mut csv = String::from(
+        "bot_id,bot_name,messages_in,messages_out,active_users,new_users,automations_run,failed\n",
+    );
+    for r in rows {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            csv_escape(&r.bot_id),
+            csv_escape(&r.bot_name),
+            r.messages_in,
+            r.messages_out,
+            r.active_users,
+            r.new_users,
+            r.automations_run,
+            r.failed,
+        ));
+    }
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"telecore-analytics-per-bot.csv\"",
+        )
+        .body(axum::body::Body::from(csv))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(response)
+}
+
 /// Export analytics: GET /api/analytics/export?format=csv|json
 pub async fn export(
     State(state): State<AppState>,

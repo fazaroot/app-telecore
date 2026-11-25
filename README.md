@@ -26,6 +26,41 @@ TeleCore terdiri dari **dua bagian yang berjalan terpisah**:
 > tersimpan (dengan penanda data lama); pengaturan lokal dan draft tetap bisa
 > dilihat.
 
+## Yang baru di v1.1.0
+
+Semua fitur di bawah ini **gratis, tanpa paywall di mana pun** — tidak ada
+fitur berbayar di TeleCore.
+
+- **Perbaikan header Android (bug POCO M6)** — header aplikasi sebelumnya
+  mentok ke status bar sehingga tombol hamburger tidak bisa diklik. Kini
+  `StatusBar.overlaysWebView: false` (config + runtime, mengikuti tema
+  light/dark) dan header/drawer/PIN lock memakai padding
+  `env(safe-area-inset-top)`. Perbaikan ini terverifikasi di build, **belum
+  di perangkat** — konfirmasi akhir ada di tangan Astr di POCO M6.
+- **MCP server** — endpoint `POST /mcp` (JSON-RPC 2.0, Streamable HTTP,
+  auth `X-API-Key`): `initialize`, `ping`, `tools/list`, `tools/call` dengan
+  7 tools (`list_bots`, `get_bot`, `send_message`, `list_users`,
+  `get_analytics_summary`, `list_workflows`, `list_scheduled_tasks`).
+  Halaman **Integrations** menampilkan endpoint, tombol tes koneksi, dan
+  salin konfigurasi JSON untuk Claude Desktop. Lihat [docs/MCP.md](docs/MCP.md).
+- **Outgoing webhooks** — langganan event (`message.inbound`,
+  `automation.executed`, `bot.disconnected`, `scheduled_task.completed`),
+  signature HMAC-SHA256 (`X-TeleCore-Signature`), log pengiriman, retry
+  manual, tombol "Kirim uji".
+- **Personal API tokens** — buat/revoke token di Security; token tampil penuh
+  **hanya sekali** saat dibuat, disimpan sebagai hash SHA-256, dipakai sebagai
+  `X-API-Key`.
+- **Broadcast messaging** — kirim satu pesan ke banyak user/grup sekaligus,
+  progress live + status per penerima (terkirim/gagal).
+- **Template variables** — `{{first_name}}`, `{{username}}`,
+  `{{chat_title}}` disubstitusi server saat pengiriman, dengan preview hasil
+  render di composer.
+- **Message search** — pencarian riwayat pesan (`GET /api/messages/search`).
+- **Live Logs** — halaman Logs: 200 baris log server terakhir, live via
+  WebSocket (fallback polling 5 detik).
+- **Per-bot analytics** — breakdown statistik per bot + export CSV.
+- Versi: backend `1.1.0` (`/api/health`), aplikasi `TeleCore v1.1.0`.
+
 ## Fitur
 
 - **Dashboard** — total bot, bot aktif/nonaktif, pesan masuk/keluar, total
@@ -37,7 +72,9 @@ TeleCore terdiri dari **dua bagian yang berjalan terpisah**:
 - **Messages** — kirim teks, foto, dokumen, video, audio, animasi (file dari
   perangkat), lokasi, kontak, media group (via API), inline/reply keyboard
   builder, MarkdownV2/HTML + preview, history, status pengiriman, retry pesan
-  teks yang gagal, template lokal perangkat.
+  teks yang gagal, template lokal perangkat, **broadcast ke banyak penerima**,
+  **template variables** (`{{first_name}}`, `{{username}}`,
+  `{{chat_title}}`) dengan preview render server, **pencarian riwayat pesan**.
 - **Automation** — workflow builder berbasis langkah (trigger → kondisi →
   aksi, multi-step + delay), welcome message, auto-reply, keyword, command,
   history eksekusi, enable/disable per workflow, loop guard (maks 10 eksekusi
@@ -53,15 +90,21 @@ TeleCore terdiri dari **dua bagian yang berjalan terpisah**:
   (maks 3x lalu dinonaktifkan + notifikasi).
 - **Analytics** — pesan per hari (inbound/outbound), pengguna aktif/baru,
   performa automation, failed requests, command usage, filter tanggal, export
-  CSV/JSON, cetak/PDF via print browser.
+  CSV/JSON, cetak/PDF via print browser, **statistik per bot + export CSV**.
+- **Integrations** — **MCP server** (`POST /mcp`, JSON-RPC 2.0, 7 tools,
+  konfigurasi Claude Desktop) dan **outgoing webhooks** (event, HMAC-SHA256,
+  log pengiriman, retry, kirim uji).
+- **Logs** — log server live (200 baris terakhir) via WebSocket + fallback
+  polling.
 - **Notifications** — bot disconnect, error API, automation gagal, task
   selesai/gagal, aktivitas tidak biasa; event penting memicu notifikasi lokal
   Android.
 - **Security** — token bot dienkripsi AES-256-GCM, token tidak pernah
   ditampilkan lengkap (hanya 4 karakter terakhir), PIN app lock (hash SHA-256
-  + salt; kunci level aplikasi, bukan hardware-backed), API key, rate limit,
-  redaksi secret di log, session management, auto-lock. **Biometrik tidak ada
-  di v1** (hanya PIN).
+  + salt; kunci level aplikasi, bukan hardware-backed), API key, **personal
+  API tokens** (tampil penuh hanya sekali saat dibuat, disimpan sebagai hash),
+  rate limit, redaksi secret di log, session management, auto-lock. **Biometrik tidak ada
+  di v1.1** (hanya PIN).
 - **Backup & Restore** — backup SQLite terenkripsi AES-256-GCM dengan
   passphrase, validasi sebelum restore (dekripsi + header SQLite +
   `integrity_check`), history backup.
@@ -71,15 +114,18 @@ TeleCore terdiri dari **dua bagian yang berjalan terpisah**:
 ```
 TeleCore/
 ├── backend/            Rust (Axum, Tokio, SQLx, SQLite)
-│   ├── src/            main, config, api (14 handler), bot, automation,
-│   │                   scheduler, security, websocket, services
-│   └── migrations/     15 tabel + FK + index
+│   ├── src/            main, config, api (MCP, logs, webhooks, tokens,
+│   │                   broadcast, search, per-bot analytics), bot, automation,
+│   │                   scheduler, security, websocket, services, logging
+│   └── migrations/     15 tabel v1 + tabel v1.1 (outgoing_webhooks,
+│                       webhook_deliveries, api_tokens) + FK + index
 ├── frontend/           React + TypeScript + Vite + Tailwind v3
-│   └── src/            11 halaman, api client, stores (Zustand),
-│                       hooks (WebSocket, notifikasi lokal), komponen
+│   └── src/            13 halaman (termasuk Integrations + Logs), api client,
+│                       stores (Zustand), hooks (WebSocket, notifikasi lokal),
+│                       komponen, utils (statusBar, copy)
 ├── android/            Proyek Capacitor Android (applicationId com.telecore.app)
 ├── .github/workflows/  android-build.yml (CI: backend + frontend + APK debug)
-├── docs/               ANDROID.md, SIGNING.md
+├── docs/               ANDROID.md, SIGNING.md, MCP.md
 ├── scripts/            (kosong — skrip utilitas bila diperlukan)
 ├── capacitor.config.ts, package.json (root, khusus Capacitor)
 ├── .env.example, .gitignore, LICENSE (MIT)
@@ -123,10 +169,10 @@ Atur Backend URL + API key di halaman Settings aplikasi.
 ## Mendapatkan APK
 
 APK **hanya** dibangun oleh GitHub Actions (tidak ada build lokal — tidak ada
-Android SDK/JDK di lingkungan ini):
+Android SDK/JDK di lingkungan ini). Repo: `fazaroot/app-telecore`
+(public, branch `main`).
 
-1. Buat repo GitHub baru (nama belum diputuskan — mis. `fazaroot/app-telecore`,
-   menunggu keputusan Astr) dan push seluruh isi proyek ini ke branch `main`.
+1. Push ke branch `main` (atau jalankan workflow manual).
 2. Workflow `.github/workflows/android-build.yml` berjalan otomatis: job
    `backend` (cargo test + build release, artifact binary server), job
    `frontend` (vitest + build), job `android` (build frontend, `cap sync`,
@@ -137,28 +183,37 @@ Android SDK/JDK di lingkungan ini):
    berjalan, mis. `http://192.168.1.10:8080`) + API key yang sama dengan
    `TELECORE_API_KEY` di server → Tes Koneksi.
 
-> **APK belum pernah dibangun.** Workflow belum pernah berjalan di GitHub
-> karena repo belum dibuat dan belum ada push. Jangan menganggap APK tersedia
-> sebelum artifact `telecore-debug-apk` benar-benar muncul di Actions.
+> **v1.0.0:** CI run #45532748058 sukses percobaan pertama (~4 menit),
+> APK 4,3 MB terverifikasi. v1.1.0 menunggu CI run setelah push ini.
 > Release APK (signed) belum tersedia — panduan signing ada di
 > [docs/SIGNING.md](docs/SIGNING.md).
 
 Detail Android (permission, cleartext HTTP lokal, SDK 35): [docs/ANDROID.md](docs/ANDROID.md).
 
-## Hasil verifikasi (2026-11-25, lingkungan Ubuntu 24.04)
+## Hasil verifikasi (v1.1, 2026-11-25, lingkungan Ubuntu 24.04)
 
 Angka-angka ini adalah hasil pengecekan nyata, bukan klaim:
 
 | Pemeriksaan | Hasil |
 |---|---|
-| `cargo test` (backend) | **41 passed, 0 failed** (enkripsi/masking, parsing Telegram, kondisi automation + loop guard, scheduler incl. cron harian/mingguan, validasi API, serialisasi kontrak API) |
-| `cargo build` (backend) | Lolos (binary `telecore-backend`) |
+| `cargo test` (backend) | **59 passed, 0 failed** (41 dari v1 + 18 baru: dispatch MCP, HMAC webhook, hash token, render template, format log, validasi event) |
+| `cargo build` (backend) | Lolos (binary `telecore-backend` v1.1.0) |
 | `npx tsc --noEmit` (frontend) | **0 error** |
-| `npm test` / vitest (frontend) | **8 passed, 0 failed** |
-| `npm run build` (frontend) | Lolos (`dist/` ~880 KB) |
-| `npx cap sync android` | Lolos, 8 plugin Capacitor terdeteksi |
-| Smoke test API (23 cek, server sementara + DB seed) | **Semua lolos** — health, auth 401, kirim teks/media payload persis frontend (mencapai api.telegram.org, 401 karena token palsu — membuktikan jalur kirim utuh), webhook tanpa `action`, workflow + eksekusi, scheduler + cron harian (next run 09:00 sesuai jam yang dipilih), command + uji, backup/restore passphrase (benar OK, salah 400), analytics, notifikasi, grup, retry |
-| Alur webhook end-to-end | Update Telegram palsu → pesan inbound tersimpan → workflow keyword terpicu → eksekusi tercatat (gagal kirim karena token palsu, sesuai harapan) |
+| `npm test` / vitest (frontend) | **15 passed, 0 failed** (11 dari v1 + 4 baru: parser baris log backend) |
+| `npm run build` (frontend) | Lolos (`dist/` ~910 KB) |
+| `npx cap sync android` | Lolos, 8 plugin Capacitor terdeteksi (termasuk StatusBar 7.0.6) |
+| Smoke test API v1.1 (25 cek, server sementara + DB sementara) | **Semua lolos** — MCP initialize/ping/tools/list (7 tools)/tools/call/unknown tool -32602/unknown method -32601/tanpa auth 401; token personal dibuat → dipakai (200) → di-revoke → 401; preview template; search (kosong → 400); webhook dibuat (secret sekali) → test ke URL mati tercatat failed → retry attempts 1→2; broadcast ke 2 penerima (token palsu → 401 Telegram per penerima, job selesai `done`); logs mengembalikan baris nyata; per-bot + export CSV; endpoint v1 (bots, messages) tetap 200 |
+| Verifikasi v1 (2026-11-25) | cargo test 41/41, vitest 8/8, smoke API 23/23, alur webhook end-to-end dengan update palsu |
+
+Perbaikan integrasi yang dilakukan saat verifikasi v1.1 (ditemukan karena
+frontend dan backend dibangun terpisah lalu dicocokkan): `GET /api/logs`
+mengembalikan `{lines: string[]}` sedangkan frontend mencari key
+`logs/items/data` — diperbaiki dengan parser baris log + normalisasi entri
+(`frontend/src/api/logs.ts`, beserta 4 unit test baru); field delivery
+webhook backend (`http_status`, `last_error`) dipetakan ke UI
+(`http_status ?? response_status ?? status_code`,
+`last_error ?? error`); placeholder `?` literal di `QueryBuilder` search
+yang menyebabkan 500 — diperbaiki backend.
 
 Perbaikan integrasi yang dilakukan saat verifikasi (ditemukan karena frontend
 dan backend dibangun terpisah lalu dicocokkan): serialisasi API (field JSON
@@ -171,13 +226,23 @@ passphrase backup di UI, pemetaan field scheduler/command/automation, bug
 mengabaikan jam cron, dan tombol inline keyboard dengan `url` + `callback_data`
 bersamaan (ditolak Telegram).
 
-## Batasan yang diketahui (v1)
+## Batasan yang diketahui (v1.1)
 
+- **Perbaikan header belum diuji di perangkat** — terverifikasi di build
+  (`cap sync` + `npm run build`), bukan di POCO M6. Astr perlu memasang APK
+  v1.1.0 dan memastikan tombol hamburger bisa diklik tanpa tertutup status bar.
 - **Belum diuji dengan bot Telegram asli** — tidak ada token bot pengujian.
   Semua panggilan Telegram terverifikasi sampai ke api.telegram.org dengan
   token palsu (401), dan alur webhook/automation terverifikasi dengan update
   palsu. Pengujian live dengan bot test adalah langkah Astr di perangkat.
-- **APK belum pernah dibangun** (menunggu repo + push + CI).
+- Pemicu outgoing webhook dari update Telegram nyata (`message.inbound`,
+  `automation.executed`, `bot.disconnected`, `scheduled_task.completed`)
+  terpasang di titik yang benar dan non-blocking, tetapi **belum teruji
+  end-to-end** dengan bot asli; hanya jalur test/retry yang terverifikasi.
+- Event WS `"log"` belum diverifikasi dengan klien WebSocket live (ring
+  buffer + `GET /api/logs` sudah terverifikasi).
+- Status broadcast hanya in-memory (hilang saat server restart); maks 1000
+  penerima per broadcast.
 - `avg_response_time_ms` di analytics = `null` (belum dilacak).
 - Retry pesan hanya untuk pesan teks (konten media tidak tersimpan di server).
 - Cron hanya format `"MENIT JAM * * DOW"` (tanpa `*/n`, range, atau list).

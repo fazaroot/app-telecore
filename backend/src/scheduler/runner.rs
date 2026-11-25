@@ -16,6 +16,7 @@ use crate::bot::get_bot_token;
 use crate::bot::telegram::SendMessageParams;
 use crate::models::ScheduledTask;
 use crate::services::log_activity;
+use crate::services::outgoing_webhooks::dispatch_outgoing_event;
 use crate::state::AppState;
 
 pub const MAX_FAILURES: i64 = 3;
@@ -106,6 +107,18 @@ async fn execute_task(state: &AppState, task: &ScheduledTask) {
                 "activity",
                 serde_json::json!({"action": "scheduled_task_executed", "task_id": task.id}),
             );
+            // --- Outgoing webhook: scheduled_task.completed (non-blocking) ---
+            dispatch_outgoing_event(
+                state,
+                "scheduled_task.completed",
+                Some(&task.bot_id),
+                serde_json::json!({
+                    "task_id": task.id,
+                    "task_name": task.name,
+                    "chat_id": task.chat_id,
+                }),
+            )
+            .await;
         }
         Err(e) => {
             let failures = task.failure_count + 1;

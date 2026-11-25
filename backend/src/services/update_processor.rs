@@ -12,6 +12,7 @@ use crate::automation::{render_template, run_workflows};
 use crate::bot::get_bot_token;
 use crate::bot::telegram::{SendMessageParams, TelegramMessage, Update};
 use crate::models::{new_id, now_rfc3339, BotChat, BotCommand};
+use crate::services::outgoing_webhooks::dispatch_outgoing_event;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -145,6 +146,21 @@ pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
     .bind(&now)
     .bind(&now)
     .execute(&state.pool)
+    .await;
+
+    // --- Outgoing webhook: message.inbound (non-blocking, spawn) ---
+    dispatch_outgoing_event(
+        state,
+        "message.inbound",
+        Some(bot_id),
+        serde_json::json!({
+            "chat_id": chat.id,
+            "from_user_id": from.map(|u| u.id),
+            "text": text,
+            "message_type": message_type,
+            "telegram_message_id": msg.message_id,
+        }),
+    )
     .await;
 
     // --- Broadcast WebSocket ---

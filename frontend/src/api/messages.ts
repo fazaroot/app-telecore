@@ -53,3 +53,59 @@ export async function deleteCommand(id: string | number): Promise<void> {
 export async function testCommand(id: string | number, chatId: string | number): Promise<unknown> {
   return apiRequest(`/api/commands/${id}/test`, { method: 'POST', body: { chat_id: chatId } })
 }
+
+// --- v1.1: Template variables preview ---
+
+export interface PreviewMessagePayload {
+  text: string
+  first_name?: string
+  username?: string
+  chat_title?: string
+}
+
+export async function previewMessage(payload: PreviewMessagePayload): Promise<string> {
+  const data = await apiRequest<{ rendered?: string } | string>('/api/messages/preview', {
+    method: 'POST',
+    body: payload,
+  })
+  if (typeof data === 'string') return data
+  return data?.rendered ?? ''
+}
+
+// --- v1.1: Message search ---
+
+export async function searchMessages(params: {
+  q: string
+  bot_id?: string | number
+  limit?: number
+}): Promise<Message[]> {
+  const data = await apiRequest<unknown>('/api/messages/search', {
+    query: { q: params.q, bot_id: params.bot_id, limit: params.limit ?? 20 },
+  })
+  return asArray<Message>(data, ['messages', 'results', 'items', 'data'])
+}
+
+// --- v1.1: Broadcast ---
+
+export interface BroadcastPayload {
+  bot_id: string | number
+  text: string
+  parse_mode?: 'MarkdownV2' | 'HTML' | 'none'
+  recipients: { chat_id: string | number }[]
+}
+
+export async function sendBroadcast(
+  payload: BroadcastPayload,
+): Promise<{ broadcast_id?: string | number; total?: number; [key: string]: unknown }> {
+  return apiRequest('/api/messages/broadcast', { method: 'POST', body: payload })
+}
+
+export async function fetchBroadcast(
+  id: string | number,
+): Promise<import('../types').BroadcastStatus> {
+  const data = await apiRequest<unknown>(`/api/messages/broadcast/${id}`)
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return data as import('../types').BroadcastStatus
+  }
+  return { id, status: 'done', results: [] }
+}

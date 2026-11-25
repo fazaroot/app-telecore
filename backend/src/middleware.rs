@@ -12,35 +12,62 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::AppError;
+use crate::models::now_rfc3339;
+use crate::services::tokens::hash_token;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Autentikasi API key (header X-API-Key)
 // ---------------------------------------------------------------------------
 
+/// Terima salah satu:
+/// 1. API key env (`TELECORE_API_KEY`), atau
+/// 2. Personal API token (`tc_...`) yang hash SHA-256-nya ada di `api_tokens`.
+///    Bila token personal cocok, `last_used_at` diupdate.
+/// Token personal tidak pernah dibandingkan dengan nilai mentah yang tersimpan
+/// (yang tersimpan hanya hash).
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let provided = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let expected = &state.config.api_key;
+    if !expected.is_empty() && constant_time_eq(&provided, expected) {
+        return next.run(req).await;
+    }
+    if provided.starts_with("tc_") {
+        let hash = hash_token(&provided);
+        let found: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM api_tokens WHERE token_hash = ?")
+                .bind(&hash)
+                .fetch_optional(&state.pool)
+                .await
+                .ok()
+                .flatten();
+        if let Some((token_id,)) = found {
+            let _ = sqlx::query(
+                "UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+            )
+            .bind(now_rfc3339())
+            .bind(&token_id)
+            .execute(&state.pool)
+            .await;
+            return next.run(req).await;
+        }
+    }
     if expected.is_empty() {
         return AppError::Unauthorized(
             "API key belum dikonfigurasi di server (set TELECORE_API_KEY)".to_string(),
         )
         .into_response();
     }
-    let provided = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    // Perbandingan panjang-tetap sederhana untuk menghindari timing leak kasar.
-    if !constant_time_eq(provided, expected) {
-        return AppError::Unauthorized("X-API-Key tidak valid atau tidak ada".to_string())
-            .into_response();
-    }
-    next.run(req).await
+    AppError::Unauthorized("X-API-Key tidak valid atau tidak ada".to_string()).into_response()
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
