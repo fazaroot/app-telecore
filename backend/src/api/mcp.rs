@@ -416,7 +416,7 @@ mod tests {
         let result = dispatch_stateless("initialize", &json!({})).unwrap();
         assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], "telecore-mcp");
-        assert_eq!(result["serverInfo"]["version"], "1.1.0");
+        assert_eq!(result["serverInfo"]["version"], "1.2.0");
         assert!(result["capabilities"]["tools"].is_object());
     }
 

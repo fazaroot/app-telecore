@@ -8,10 +8,13 @@ import {
   fetchBroadcast,
   fetchCommands,
   fetchMessages,
+  messageTypeLabel,
   retryMessage,
   searchMessages,
   sendBroadcast,
   sendMessage,
+  sendPoll,
+  sendSticker,
   testCommand,
   updateCommand,
   type SendMessagePayload,
@@ -128,6 +131,20 @@ export function MessagesPage() {
 
   const sendMutation = useMutation({
     mutationFn: (v: ComposerValue) => {
+      if (v.kind === 'poll' && v.poll) {
+        return sendPoll({
+          bot_id: v.botId,
+          chat_id: v.chatId,
+          question: v.poll.question,
+          options: v.poll.options,
+          is_quiz: v.poll.isQuiz,
+          correct_option_id: v.poll.correctOptionId,
+          explanation: v.poll.explanation,
+        })
+      }
+      if (v.kind === 'sticker' && v.sticker) {
+        return sendSticker({ bot_id: v.botId, chat_id: v.chatId, sticker: v.sticker })
+      }
       const payload: SendMessagePayload = {
         bot_id: v.botId,
         chat_id: v.chatId,
@@ -139,8 +156,11 @@ export function MessagesPage() {
       }
       return sendMessage(payload)
     },
-    onSuccess: () => {
-      pushToast('Pesan dikirim.', 'success')
+    onSuccess: (_res, v) => {
+      pushToast(
+        v.kind === 'poll' ? 'Poll dikirim.' : v.kind === 'sticker' ? 'Stiker dikirim.' : 'Pesan dikirim.',
+        'success',
+      )
       void queryClient.invalidateQueries({ queryKey: ['messages'] })
     },
     onError: (e: Error) => pushToast(e.message, 'error'),
@@ -549,7 +569,7 @@ export function MessagesPage() {
                         {m.status ?? '—'}
                       </Badge>
                       <span className="text-xs text-ink/50 dark:text-darktext/50">
-                        {m.message_type ?? 'text'} · chat {m.chat_id ?? '—'}
+                        {messageTypeLabel(m.message_type)} · chat {m.chat_id ?? '—'}
                       </span>
                     </div>
                     <p className="mt-2 whitespace-pre-wrap text-sm">{m.text ?? m.content ?? '(media tanpa teks)'}</p>

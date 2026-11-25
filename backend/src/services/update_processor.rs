@@ -12,6 +12,7 @@ use crate::automation::{render_template, run_workflows};
 use crate::bot::get_bot_token;
 use crate::bot::telegram::{SendMessageParams, TelegramMessage, Update};
 use crate::models::{new_id, now_rfc3339, BotChat, BotCommand};
+use crate::services::ai::{automation_handled, maybe_ai_reply};
 use crate::services::outgoing_webhooks::dispatch_outgoing_event;
 use crate::state::AppState;
 
@@ -49,6 +50,13 @@ pub async fn log_activity(
 // ---------------------------------------------------------------------------
 
 pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
+    // v1.2: pre-checkout query pembayaran — jawab ok=true agar user bisa
+    // melanjutkan pembayaran (tidak ada validasi harga tambahan di v1.2).
+    if let Some(pcq) = &update.pre_checkout_query {
+        handle_pre_checkout_query(state, bot_id, pcq).await;
+        return;
+    }
+
     let Some(msg) = update
         .message
         .as_ref()
@@ -123,8 +131,10 @@ pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
     .execute(&state.pool)
     .await;
 
-    // --- Simpan pesan masuk ---
-    let message_type = if msg.photo.is_some() {
+    // --- Simpan pesan masuk (v1.2: is_read=0 = belum dibaca di inbox) ---
+    let message_type = if msg.successful_payment.is_some() {
+        "payment"
+    } else if msg.photo.is_some() {
         "photo"
     } else if msg.new_chat_members.is_some() {
         "new_chat_members"
@@ -133,8 +143,8 @@ pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
     };
     let _ = sqlx::query(
         "INSERT INTO messages (id, bot_id, chat_id, telegram_message_id, direction, \
-         message_type, content, status, from_user_id, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, 'inbound', ?, ?, 'received', ?, ?, ?)",
+         message_type, content, status, from_user_id, is_read, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 'inbound', ?, ?, 'received', ?, 0, ?, ?)",
     )
     .bind(new_id())
     .bind(bot_id)
@@ -174,6 +184,13 @@ pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
             "message_type": message_type,
         }),
     );
+
+    // --- v1.2: successful_payment — tandai order lunas, lalu berhenti
+    // (tidak ada automation / AI untuk pesan pembayaran).
+    if let Some(payment) = &msg.successful_payment {
+        handle_successful_payment(state, bot_id, payment).await;
+        return;
+    }
 
     // --- Konteks automation ---
     let context = serde_json::json!({
@@ -247,6 +264,130 @@ pub async fn process_update(state: &AppState, bot_id: &str, update: &Update) {
     // --- Trigger umum ---
     run_workflows(state, bot_id, "message_received", context.clone()).await;
     run_workflows(state, bot_id, "keyword", context).await;
+
+    // --- v1.2: AI Smart Reply — hanya bila command/keyword automation
+    // tidak menangani pesan ini (dan bukan command '/...').
+    if !text.trim().is_empty()
+        && !text.starts_with('/')
+        && !automation_handled(state, bot_id, &text).await
+    {
+        maybe_ai_reply(
+            state,
+            bot_id,
+            chat.id,
+            &chat.chat_type,
+            from.map(|u| u.id),
+            msg.message_id,
+            &text,
+        )
+        .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pembayaran Stars (v1.2)
+// ---------------------------------------------------------------------------
+
+async fn handle_pre_checkout_query(
+    state: &AppState,
+    bot_id: &str,
+    pcq: &serde_json::Value,
+) {
+    let Some(query_id) = pcq.get("id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Ok(token) = get_bot_token(state, bot_id).await else {
+        return;
+    };
+    let _ = state
+        .telegram
+        .answer_pre_checkout_query(&token, query_id, true, None)
+        .await;
+    log_activity(
+        state,
+        Some(bot_id),
+        "pre_checkout_answered",
+        Some("order"),
+        None,
+        serde_json::json!({
+            "pre_checkout_query_id": query_id,
+            "invoice_payload": pcq.get("invoice_payload"),
+            "total_amount": pcq.get("total_amount"),
+            "currency": pcq.get("currency"),
+        }),
+        "info",
+    )
+    .await;
+}
+
+async fn handle_successful_payment(
+    state: &AppState,
+    bot_id: &str,
+    payment: &serde_json::Value,
+) {
+    let invoice_payload = payment
+        .get("invoice_payload")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if invoice_payload.is_empty() {
+        return;
+    }
+    let tg_charge = payment
+        .get("telegram_payment_charge_id")
+        .and_then(|v| v.as_str());
+    let provider_charge = payment
+        .get("provider_payment_charge_id")
+        .and_then(|v| v.as_str());
+    let now = now_rfc3339();
+    // Cari order berdasarkan invoice_payload persis (berisi product payload
+    // + '#' + order id); fallback ke product payload saja.
+    let order_id: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM orders WHERE bot_id = ? AND invoice_payload = ? AND status = 'pending'",
+    )
+    .bind(bot_id)
+    .bind(invoice_payload)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((order_id,)) = order_id else {
+        log_activity(
+            state,
+            Some(bot_id),
+            "payment_received_unknown_order",
+            Some("order"),
+            None,
+            serde_json::json!({"invoice_payload": invoice_payload}),
+            "warning",
+        )
+        .await;
+        return;
+    };
+    let _ = sqlx::query(
+        "UPDATE orders SET status = 'paid', paid_at = ?, \
+         telegram_payment_charge_id = ?, provider_payment_charge_id = ? WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(tg_charge)
+    .bind(provider_charge)
+    .bind(&order_id)
+    .execute(&state.pool)
+    .await;
+    log_activity(
+        state,
+        Some(bot_id),
+        "payment_successful",
+        Some("order"),
+        Some(&order_id),
+        serde_json::json!({
+            "invoice_payload": invoice_payload,
+            "total_amount": payment.get("total_amount"),
+            "currency": payment.get("currency"),
+            "telegram_payment_charge_id": tg_charge,
+        }),
+        "info",
+    )
+    .await;
 }
 
 async fn send_welcome_if_configured(state: &AppState, bot_id: &str, chat_id: i64, first_name: &str) {

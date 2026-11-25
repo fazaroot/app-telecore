@@ -6,7 +6,10 @@ import {
   Bell,
   Bot,
   CalendarClock,
+  CreditCard,
   Home,
+  Inbox,
+  Megaphone,
   Menu,
   MessageSquare,
   Moon,
@@ -28,7 +31,10 @@ import { Toasts } from './Toast'
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: Home },
   { to: '/bots', label: 'My Bots', icon: Bot },
+  { to: '/inbox', label: 'Inbox', icon: Inbox },
   { to: '/messages', label: 'Messages', icon: MessageSquare },
+  { to: '/payments', label: 'Payments', icon: CreditCard },
+  { to: '/channels', label: 'Channels', icon: Megaphone },
   { to: '/automation', label: 'Automation', icon: Workflow },
   { to: '/users', label: 'Users', icon: Users },
   { to: '/groups', label: 'Groups', icon: UsersRound },
@@ -184,7 +190,7 @@ export function Layout() {
                 ))}
               </div>
               <p className="mt-6 px-3 text-xs text-ink/50 dark:text-darktext/50">
-                TeleCore v1.1.0 — Telegram Bot Control Center
+                TeleCore v1.2.0 — Telegram Bot Control Center
               </p>
             </motion.nav>
           </>

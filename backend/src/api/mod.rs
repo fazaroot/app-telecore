@@ -4,22 +4,27 @@
 //! - Semua `/api/*` lainnya WAJIB header `X-API-Key` (middleware auth).
 //! - Rate limit per IP berlaku untuk semua route.
 
+pub mod ai_providers;
 pub mod analytics;
 pub mod automation;
 pub mod backups;
 pub mod bots;
+pub mod channels;
 pub mod commands;
 pub mod groups;
 pub mod health;
+pub mod inbox;
 pub mod logs;
 pub mod mcp;
 pub mod messages;
 pub mod notifications;
 pub mod outgoing_webhooks;
+pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod settings;
 pub mod users;
+pub mod watchdog;
 pub mod webhooks;
 
 use axum::{
@@ -52,6 +57,8 @@ pub fn build_router(state: AppState) -> Router<()> {
             get(bots::get_config).put(bots::update_config),
         )
         .route("/bots/:id/webhook", post(bots::set_bot_webhook))
+        // AI per bot (v1.2)
+        .route("/bots/:id/ai", put(ai_providers::update_bot_ai))
         // Messages
         // POST /messages = kirim (dipakai frontend); /messages/send alias lama.
         .route(
@@ -69,6 +76,9 @@ pub fn build_router(state: AppState) -> Router<()> {
         .route("/messages/send-media", post(messages::send_media_multipart))
         .route("/messages/history", get(messages::message_history))
         .route("/messages/:id/retry", post(messages::retry_message))
+        // Poll & sticker (v1.2)
+        .route("/messages/poll", post(messages::send_poll))
+        .route("/messages/sticker", post(messages::send_sticker))
         // Commands
         .route(
             "/commands",
@@ -186,8 +196,43 @@ pub fn build_router(state: AppState) -> Router<()> {
             "/backups",
             get(backups::list_backups).post(backups::create_backup),
         )
+        .route("/backups/auto-settings", get(backups::get_auto_settings).put(backups::update_auto_settings))
         .route("/backups/:id/restore", post(backups::restore_backup))
         .route("/backups/:id", delete(backups::delete_backup))
+        // Inbox (v1.2)
+        .route("/inbox", get(inbox::list_inbox))
+        .route("/inbox/:chat_id", get(inbox::get_conversation))
+        .route("/inbox/:chat_id/reply", post(inbox::reply_conversation))
+        // AI providers (v1.2)
+        .route(
+            "/ai-providers",
+            get(ai_providers::list_providers).post(ai_providers::create_provider),
+        )
+        .route(
+            "/ai-providers/:id",
+            get(ai_providers::get_provider)
+                .put(ai_providers::update_provider)
+                .delete(ai_providers::delete_provider),
+        )
+        .route("/ai-providers/:id/test", post(ai_providers::test_provider))
+        // Watchdog (v1.2)
+        .route("/watchdog/status", get(watchdog::get_status))
+        .route("/watchdog/settings", put(watchdog::update_settings))
+        // Payments / Stars (v1.2)
+        .route(
+            "/payments/products",
+            get(payments::list_products).post(payments::create_product),
+        )
+        .route(
+            "/payments/products/:id",
+            put(payments::update_product).delete(payments::delete_product),
+        )
+        .route("/payments/orders", get(payments::list_orders))
+        .route("/payments/:product_id/invoice", post(payments::create_invoice))
+        // Channels (v1.2)
+        .route("/channels", get(channels::list_channels))
+        .route("/channels/:chat_id/post", post(channels::post_channel))
+        .route("/channels/:chat_id/schedule", post(channels::schedule_channel))
         // Settings
         .route(
             "/settings",

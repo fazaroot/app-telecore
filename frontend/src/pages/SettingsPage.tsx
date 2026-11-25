@@ -1,12 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, Database, Download, HardDriveDownload, RefreshCw, Trash2, XCircle } from 'lucide-react'
+import { CheckCircle2, Database, Download, HardDriveDownload, HeartPulse, RefreshCw, Trash2, XCircle } from 'lucide-react'
 import { fetchHealth } from '../api/bots'
-import { createBackup, deleteBackup, fetchAppSettings, fetchBackups, restoreBackup, updateAppSettings } from '../api/misc'
+import { fetchWatchdogStatus, updateWatchdogSettings } from '../api/watchdog'
+import { createBackup, deleteBackup, fetchAppSettings, fetchAutoBackupSettings, fetchBackups, restoreBackup, updateAppSettings, updateAutoBackupSettings } from '../api/misc'
 import { DEFAULT_BASE_URL, useSettingsStore, useUiStore } from '../stores/settings'
 import { Badge, Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
 import { ConfirmDialog } from '../components/Modal'
-import type { Backup } from '../types'
+import { AiProvidersSection } from '../components/AiProvidersSection'
+import type { AutoBackupSettings, Backup } from '../types'
 
 const inputCls =
   'w-full rounded-lg border border-ink/15 bg-bg px-3 py-2 text-sm dark:border-darktext/15 dark:bg-darkbg'
@@ -29,8 +31,40 @@ export function SettingsPage() {
   const [backupPassphrase, setBackupPassphrase] = useState('')
   const passphraseOk = backupPassphrase.length >= 8
 
+  // Watchdog (v1.2)
+  const [wdInterval, setWdInterval] = useState('5')
+  const [wdAutoRestart, setWdAutoRestart] = useState(true)
+  const [wdLoaded, setWdLoaded] = useState(false)
+  // Auto-backup (v1.2)
+  const [abEnabled, setAbEnabled] = useState(false)
+  const [abFrequency, setAbFrequency] = useState<'daily' | 'weekly'>('daily')
+  const [abHour, setAbHour] = useState('2')
+  const [abRetention, setAbRetention] = useState('7')
+  const [abLoaded, setAbLoaded] = useState(false)
+
   const serverSettingsQuery = useQuery({ queryKey: ['app-settings'], queryFn: fetchAppSettings })
   const backupsQuery = useQuery({ queryKey: ['backups'], queryFn: fetchBackups })
+  const watchdogQuery = useQuery({ queryKey: ['watchdog', 'status'], queryFn: fetchWatchdogStatus })
+  const autoBackupQuery = useQuery({ queryKey: ['auto-backup-settings'], queryFn: fetchAutoBackupSettings })
+
+  useEffect(() => {
+    if (watchdogQuery.data && !wdLoaded) {
+      setWdInterval(String(watchdogQuery.data.interval_minutes ?? 5))
+      setWdAutoRestart(Boolean(watchdogQuery.data.auto_restart))
+      setWdLoaded(true)
+    }
+  }, [watchdogQuery.data, wdLoaded])
+
+  useEffect(() => {
+    if (autoBackupQuery.data && !abLoaded) {
+      const s = autoBackupQuery.data
+      setAbEnabled(Boolean(s.enabled))
+      setAbFrequency((s.frequency as 'daily' | 'weekly') ?? 'daily')
+      setAbHour(String(s.hour ?? 2))
+      setAbRetention(String(s.retention ?? 7))
+      setAbLoaded(true)
+    }
+  }, [autoBackupQuery.data, abLoaded])
 
   const testMutation = useMutation({
     mutationFn: async () => {
@@ -82,6 +116,36 @@ export function SettingsPage() {
       pushToast('Backup dihapus.', 'success')
       setDeletingBackup(null)
       void queryClient.invalidateQueries({ queryKey: ['backups'] })
+    },
+    onError: (e: Error) => pushToast(e.message, 'error'),
+  })
+
+  const watchdogMutation = useMutation({
+    mutationFn: () =>
+      updateWatchdogSettings({
+        interval_minutes: Math.min(60, Math.max(1, Number(wdInterval) || 5)),
+        auto_restart: wdAutoRestart,
+      }),
+    onSuccess: () => {
+      pushToast('Pengaturan watchdog disimpan.', 'success')
+      void queryClient.invalidateQueries({ queryKey: ['watchdog', 'status'] })
+    },
+    onError: (e: Error) => pushToast(e.message, 'error'),
+  })
+
+  const autoBackupMutation = useMutation({
+    mutationFn: () => {
+      const body: AutoBackupSettings = {
+        enabled: abEnabled,
+        frequency: abFrequency,
+        hour: Math.min(23, Math.max(0, Number(abHour) || 2)),
+        retention: Math.max(1, Number(abRetention) || 7),
+      }
+      return updateAutoBackupSettings(body)
+    },
+    onSuccess: () => {
+      pushToast('Pengaturan auto-backup disimpan.', 'success')
+      void queryClient.invalidateQueries({ queryKey: ['auto-backup-settings'] })
     },
     onError: (e: Error) => pushToast(e.message, 'error'),
   })
@@ -201,6 +265,51 @@ export function SettingsPage() {
         </div>
       </Card>
 
+      <AiProvidersSection />
+
+      <Card>
+        <h2 className="mb-3 flex items-center gap-2 font-bold">
+          <HeartPulse className="h-5 w-5" /> Bot Watchdog
+        </h2>
+        <p className="mb-3 text-sm text-ink/60 dark:text-darktext/60">
+          Watchdog memeriksa koneksi setiap bot secara berkala dan bisa me-restart bot yang gagal.
+        </p>
+        {watchdogQuery.isLoading ? (
+          <LoadingSpinner label="Memuat pengaturan watchdog…" />
+        ) : watchdogQuery.isError ? (
+          <ErrorState message={(watchdogQuery.error as Error).message} onRetry={() => void watchdogQuery.refetch()} />
+        ) : (
+          <div className="space-y-3">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium">Interval pengecekan (menit, 1–60)</span>
+              <input
+                value={wdInterval}
+                onChange={(e) => setWdInterval(e.target.value)}
+                inputMode="numeric"
+                className={inputCls}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium">Auto-restart bot yang gagal</span>
+              <input
+                type="checkbox"
+                checked={wdAutoRestart}
+                onChange={(e) => setWdAutoRestart(e.target.checked)}
+                className="h-5 w-5 accent-primary"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => watchdogMutation.mutate()}
+              disabled={watchdogMutation.isPending}
+              className="rounded-full bg-primary px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+            >
+              {watchdogMutation.isPending ? 'Menyimpan…' : 'Simpan Pengaturan Watchdog'}
+            </button>
+          </div>
+        )}
+      </Card>
+
       <Card>
         <h2 className="mb-3 flex items-center gap-2 font-bold">
           <Database className="h-5 w-5" /> Backup & Restore
@@ -242,7 +351,12 @@ export function SettingsPage() {
             {backups.map((b) => (
               <li key={String(b.id)} className="flex items-center justify-between gap-3 rounded-xl border border-ink/10 p-3 dark:border-darktext/10">
                 <div className="min-w-0 text-sm">
-                  <p className="truncate font-semibold">{b.name ?? b.filename ?? `Backup ${b.id}`}</p>
+                  <p className="flex flex-wrap items-center gap-1.5 truncate font-semibold">
+                    {b.name ?? b.filename ?? `Backup ${b.id}`}
+                    {(b.is_automatic === true || b.is_automatic === 1) && (
+                      <Badge tone="info">Otomatis</Badge>
+                    )}
+                  </p>
                   <p className="text-ink/50 dark:text-darktext/50">
                     {b.created_at ? new Date(b.created_at).toLocaleString('id-ID') : ''}
                     {(b.size ?? b.size_bytes) !== undefined
@@ -273,6 +387,60 @@ export function SettingsPage() {
             ))}
           </ul>
         )}
+
+        <div className="mt-4 space-y-3 border-t border-ink/10 pt-4 dark:border-darktext/10">
+          <h3 className="font-bold">Auto-Backup Terjadwal</h3>
+          {autoBackupQuery.isLoading ? (
+            <LoadingSpinner label="Memuat pengaturan auto-backup…" />
+          ) : autoBackupQuery.isError ? (
+            <ErrorState message={(autoBackupQuery.error as Error).message} onRetry={() => void autoBackupQuery.refetch()} />
+          ) : (
+            <>
+              <label className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">Auto-backup aktif</span>
+                <input
+                  type="checkbox"
+                  checked={abEnabled}
+                  onChange={(e) => setAbEnabled(e.target.checked)}
+                  className="h-5 w-5 accent-primary"
+                />
+              </label>
+              <div className="grid grid-cols-3 gap-3">
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">Frekuensi</span>
+                  <select
+                    value={abFrequency}
+                    onChange={(e) => setAbFrequency(e.target.value as 'daily' | 'weekly')}
+                    className={inputCls}
+                  >
+                    <option value="daily">Harian</option>
+                    <option value="weekly">Mingguan</option>
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">Jam (0–23)</span>
+                  <input value={abHour} onChange={(e) => setAbHour(e.target.value)} inputMode="numeric" className={inputCls} />
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">Retensi (generasi)</span>
+                  <input value={abRetention} onChange={(e) => setAbRetention(e.target.value)} inputMode="numeric" className={inputCls} />
+                </label>
+              </div>
+              <p className="text-xs text-ink/50 dark:text-darktext/50">
+                Backup otomatis dibuat di server sesuai jadwal dan ditandai badge &quot;Otomatis&quot;
+                di daftar di atas. Generasi lama di luar retensi dihapus otomatis.
+              </p>
+              <button
+                type="button"
+                onClick={() => autoBackupMutation.mutate()}
+                disabled={autoBackupMutation.isPending}
+                className="rounded-full bg-primary px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {autoBackupMutation.isPending ? 'Menyimpan…' : 'Simpan Auto-Backup'}
+              </button>
+            </>
+          )}
+        </div>
       </Card>
 
       <Card>
@@ -280,7 +448,7 @@ export function SettingsPage() {
         <dl className="space-y-1 text-sm">
           <div className="flex justify-between">
             <dt className="text-ink/60 dark:text-darktext/60">Aplikasi</dt>
-            <dd className="font-medium">TeleCore v1.1.0</dd>
+            <dd className="font-medium">TeleCore v1.2.0</dd>
           </div>
           <div className="flex justify-between">
             <dt className="text-ink/60 dark:text-darktext/60">Backend</dt>

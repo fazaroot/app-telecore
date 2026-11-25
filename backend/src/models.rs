@@ -133,6 +133,10 @@ pub struct Bot {
     pub description: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// v1.2 (watchdog): terakhir kali getMe dicek.
+    pub last_check_at: Option<String>,
+    /// v1.2 (watchdog): jumlah kegagalan getMe berturut-turut.
+    pub consecutive_failures: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -152,6 +156,15 @@ pub struct BotConfiguration {
     pub welcome_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// v1.2 (AI Smart Reply).
+    pub ai_provider_id: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub ai_enabled: i64,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub ai_allow_groups: i64,
+    pub ai_system_prompt: Option<String>,
+    pub ai_max_tokens: i64,
+    pub ai_temperature: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -228,6 +241,8 @@ pub struct Message {
     pub reply_to_message_id: Option<i64>,
     pub parse_mode: Option<String>,
     pub error_message: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub is_read: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -300,6 +315,10 @@ pub struct ScheduledTask {
     pub is_active: i64,
     #[serde(serialize_with = "ser_i64_bool")]
     pub is_paused: i64,
+    /// v1.2: target pengiriman khusus, mis. "channel" + target_id = chat_id
+    /// channel (untuk posting channel terjadwal). NULL = kirim biasa ke chat_id.
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -345,6 +364,8 @@ pub struct Backup {
     pub filename: String,
     pub size_bytes: i64,
     pub description: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub is_automatic: i64,
     pub created_at: String,
 }
 
@@ -410,6 +431,63 @@ pub struct ApiToken {
 }
 
 // ---------------------------------------------------------------------------
+// v1.2: AI providers, produk & order Stars, AI usage
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AiProvider {
+    pub id: String,
+    pub name: String,
+    pub provider_type: String, // openai_compatible | anthropic | gemini
+    pub base_url: Option<String>,
+    pub model: String,
+    /// TIDAK PERNAH diserialisasi — API key terenkripsi AES-256-GCM.
+    #[serde(skip_serializing)]
+    pub api_key_encrypted: Option<String>,
+    pub api_key_last4: Option<String>,
+    #[serde(serialize_with = "ser_i64_bool")]
+    pub enabled: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Product {
+    pub id: String,
+    pub bot_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub payload: String,
+    /// Satuan terkecil: Stars = jumlah Stars; fiat = cents.
+    pub price: i64,
+    pub currency: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Order {
+    pub id: String,
+    pub bot_id: String,
+    pub product_id: Option<String>,
+    pub chat_id: String,
+    pub invoice_payload: String,
+    pub telegram_payment_charge_id: Option<String>,
+    pub provider_payment_charge_id: Option<String>,
+    pub amount: i64,
+    pub currency: String,
+    pub status: String, // pending | paid | failed | cancelled
+    pub created_at: String,
+    pub paid_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AiUsage {
+    pub bot_id: String,
+    pub user_id: String,
+    pub hour_bucket: String,
+    pub count: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
 
@@ -458,6 +536,8 @@ mod tests {
             description: None,
             created_at: "2026-11-25T00:00:00Z".to_string(),
             updated_at: "2026-11-25T00:00:00Z".to_string(),
+            last_check_at: None,
+            consecutive_failures: 0,
         };
         let v: serde_json::Value = serde_json::to_value(&bot).unwrap();
         assert_eq!(v["connection_status"], "connected");

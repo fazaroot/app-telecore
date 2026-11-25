@@ -8,6 +8,9 @@ import { useSettingsStore } from './stores/settings'
 import { syncStatusBar } from './utils/statusBar'
 import { DashboardPage } from './pages/DashboardPage'
 import { BotsPage } from './pages/BotsPage'
+import { InboxPage } from './pages/InboxPage'
+import { PaymentsPage } from './pages/PaymentsPage'
+import { ChannelsPage } from './pages/ChannelsPage'
 import { MessagesPage } from './pages/MessagesPage'
 import { AutomationPage } from './pages/AutomationPage'
 import { UsersPage } from './pages/UsersPage'
@@ -65,7 +68,10 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={<DashboardPage />} />
             <Route path="bots" element={<BotsPage />} />
+            <Route path="inbox" element={<InboxPage />} />
             <Route path="messages" element={<MessagesPage />} />
+            <Route path="payments" element={<PaymentsPage />} />
+            <Route path="channels" element={<ChannelsPage />} />
             <Route path="automation" element={<AutomationPage />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="groups" element={<GroupsPage />} />

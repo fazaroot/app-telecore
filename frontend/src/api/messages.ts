@@ -72,6 +72,88 @@ export async function previewMessage(payload: PreviewMessagePayload): Promise<st
   return data?.rendered ?? ''
 }
 
+// --- v1.2: Poll, Quiz & Sticker ---
+
+export interface SendPollPayload {
+  bot_id: string | number
+  chat_id: string | number
+  question: string
+  options: string[]
+  is_quiz?: boolean
+  correct_option_id?: number
+  explanation?: string
+}
+
+export async function sendPoll(payload: SendPollPayload): Promise<unknown> {
+  return apiRequest('/api/messages/poll', { method: 'POST', body: payload })
+}
+
+export interface SendStickerPayload {
+  bot_id: string | number
+  chat_id: string | number
+  sticker: string
+}
+
+export async function sendSticker(payload: SendStickerPayload): Promise<unknown> {
+  return apiRequest('/api/messages/sticker', { method: 'POST', body: payload })
+}
+
+export const POLL_MIN_OPTIONS = 2
+export const POLL_MAX_OPTIONS = 10
+
+export interface PollInput {
+  question: string
+  options: string[]
+  isQuiz: boolean
+  correctOptionId?: number | null
+  explanation?: string
+}
+
+/**
+ * Validasi form poll/kuis. Mengembalikan pesan error (Bahasa Indonesia) atau
+ * null bila valid. Aturan Telegram: pertanyaan wajib, opsi 2–10, kuis wajib
+ * punya satu jawaban benar.
+ */
+export function validatePollInput(input: PollInput): string | null {
+  if (!input.question.trim()) return 'Pertanyaan poll wajib diisi.'
+  const options = input.options.map((o) => o.trim()).filter(Boolean)
+  if (options.length < POLL_MIN_OPTIONS) return `Poll membutuhkan minimal ${POLL_MIN_OPTIONS} opsi.`
+  if (options.length > POLL_MAX_OPTIONS) return `Poll maksimal ${POLL_MAX_OPTIONS} opsi.`
+  if (input.isQuiz) {
+    if (input.correctOptionId === undefined || input.correctOptionId === null) {
+      return 'Kuis membutuhkan satu jawaban benar.'
+    }
+    if (input.correctOptionId < 0 || input.correctOptionId >= options.length) {
+      return 'Jawaban benar di luar daftar opsi.'
+    }
+  }
+  return null
+}
+
+/** Label berbahasa Indonesia untuk message_type di riwayat pesan. */
+export function messageTypeLabel(messageType?: string): string {
+  switch ((messageType ?? 'text').toLowerCase()) {
+    case 'poll':
+      return 'Poll'
+    case 'quiz':
+      return 'Kuis'
+    case 'sticker':
+      return 'Stiker'
+    case 'photo':
+      return 'Foto'
+    case 'document':
+      return 'Dokumen'
+    case 'video':
+      return 'Video'
+    case 'audio':
+      return 'Audio'
+    case 'animation':
+      return 'Animasi (GIF)'
+    default:
+      return 'Teks'
+  }
+}
+
 // --- v1.1: Message search ---
 
 export async function searchMessages(params: {

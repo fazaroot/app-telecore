@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bot as BotIcon, Download, Plug, Plus, RefreshCw, Settings2, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
+import { Bot as BotIcon, Download, Plug, Plus, RefreshCw, Settings2, Sparkles, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import {
   connectBot,
   createBot,
@@ -14,6 +14,7 @@ import {
   updateBot,
   updateBotConfig,
 } from '../api/bots'
+import { fetchAiProviders, updateBotAi } from '../api/ai'
 import { downloadTextFile } from '../api/client'
 import { useUiStore } from '../stores/settings'
 import { Badge, Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
@@ -34,6 +35,144 @@ function statusBadge(status?: string) {
     default:
       return <Badge>Belum diuji</Badge>
   }
+}
+
+/** Pengaturan AI per bot (v1.2): provider, toggle, system prompt, max tokens, temperature. */
+function BotAiSettingsForm({ botId }: { botId: string | number }) {
+  const queryClient = useQueryClient()
+  const pushToast = useUiStore((s) => s.pushToast)
+  const [providerId, setProviderId] = useState('')
+  const [aiEnabled, setAiEnabled] = useState(false)
+  const [allowGroups, setAllowGroups] = useState(false)
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [maxTokens, setMaxTokens] = useState('1000')
+  const [temperature, setTemperature] = useState('0.7')
+  const [loaded, setLoaded] = useState(false)
+
+  const botQuery = useQuery({ queryKey: ['bot-config', botId], queryFn: () => fetchBotConfig(botId) })
+  const providersQuery = useQuery({ queryKey: ['ai-providers'], queryFn: fetchAiProviders })
+
+  // Isi form dari konfigurasi AI yang dikembalikan GET /api/bots/{id}/config
+  // (field ai_* ada di BotConfiguration, bukan di GET /api/bots/{id}).
+  useEffect(() => {
+    if (botQuery.data && !loaded) {
+      const b = botQuery.data
+      setProviderId(b.ai_provider_id !== undefined && b.ai_provider_id !== null ? String(b.ai_provider_id) : '')
+      setAiEnabled(Boolean(b.ai_enabled))
+      setAllowGroups(Boolean(b.ai_allow_groups))
+      setSystemPrompt(b.ai_system_prompt ?? '')
+      setMaxTokens(b.ai_max_tokens !== undefined ? String(b.ai_max_tokens) : '1000')
+      setTemperature(b.ai_temperature !== undefined ? String(b.ai_temperature) : '0.7')
+      setLoaded(true)
+    }
+  }, [botQuery.data, loaded])
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      updateBotAi(botId, {
+        ai_provider_id: providerId === '' ? null : providerId,
+        ai_enabled: aiEnabled,
+        ai_allow_groups: allowGroups,
+        ai_system_prompt: systemPrompt.trim(),
+        ai_max_tokens: Number(maxTokens) || 1000,
+        ai_temperature: Number(temperature) || 0.7,
+      }),
+    onSuccess: () => {
+      pushToast('Pengaturan AI bot disimpan.', 'success')
+      void queryClient.invalidateQueries({ queryKey: ['bot-config', botId] })
+      void queryClient.invalidateQueries({ queryKey: ['bots'] })
+    },
+    onError: (e: Error) => pushToast(e.message, 'error'),
+  })
+
+  const providers = providersQuery.data ?? []
+  const tokensValid = Number(maxTokens) > 0 && Number(maxTokens) <= 8000
+  const tempValid = Number(temperature) >= 0 && Number(temperature) <= 2
+
+  if (botQuery.isLoading || providersQuery.isLoading) return <LoadingSpinner label="Memuat pengaturan AI…" />
+  if (botQuery.isError) {
+    return <ErrorState message={(botQuery.error as Error).message} onRetry={() => void botQuery.refetch()} />
+  }
+
+  return (
+    <div className="space-y-3 border-t border-ink/10 pt-4 dark:border-darktext/10">
+      <h3 className="flex items-center gap-2 font-bold">
+        <Sparkles className="h-4 w-4 text-primary" /> Balasan Otomatis AI (Smart Reply)
+      </h3>
+      {providers.length === 0 ? (
+        <p className="rounded-xl bg-amber-500/15 p-3 text-sm text-amber-700 dark:text-amber-400">
+          Belum ada AI provider. Tambahkan provider dulu di Settings → AI Providers.
+        </p>
+      ) : (
+        <>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium">AI Provider</span>
+            <select value={providerId} onChange={(e) => setProviderId(e.target.value)} className={inputCls}>
+              <option value="">Pilih provider…</option>
+              {providers.map((p) => (
+                <option key={String(p.id)} value={String(p.id)}>
+                  {p.name ?? `Provider ${p.id}`} — {p.model ?? '—'}
+                  {p.enabled === false ? ' (nonaktif)' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">Balasan AI aktif</span>
+            <input type="checkbox" checked={aiEnabled} onChange={(e) => setAiEnabled(e.target.checked)} className="h-5 w-5 accent-primary" />
+          </label>
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">Izinkan AI membalas di grup</span>
+            <input type="checkbox" checked={allowGroups} onChange={(e) => setAllowGroups(e.target.checked)} className="h-5 w-5 accent-primary" />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium">System prompt</span>
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              placeholder="mis. Kamu adalah asisten toko yang ramah. Jawab singkat dalam Bahasa Indonesia."
+              rows={3}
+              className={inputCls}
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium">Max tokens</span>
+              <input
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+                inputMode="numeric"
+                className={inputCls}
+              />
+              {!tokensValid && <span className="mt-1 block text-xs text-danger">Isi 1–8000 (batas server).</span>}
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium">Temperature</span>
+              <input
+                value={temperature}
+                onChange={(e) => setTemperature(e.target.value)}
+                inputMode="decimal"
+                className={inputCls}
+              />
+              {!tempValid && <span className="mt-1 block text-xs text-danger">Isi 0–2.</span>}
+            </label>
+          </div>
+          <p className="rounded-xl bg-primary/10 p-3 text-sm text-ink/80 dark:text-darktext/80">
+            Biaya pemakaian API AI ditanggung ke provider masing-masing; kunci disimpan terenkripsi
+            di server.
+          </p>
+          <button
+            type="button"
+            disabled={!providerId || !tokensValid || !tempValid || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            className="w-full rounded-full bg-primary py-2.5 text-sm font-bold text-white disabled:opacity-50"
+          >
+            {saveMutation.isPending ? 'Menyimpan…' : 'Simpan Pengaturan AI'}
+          </button>
+        </>
+      )}
+    </div>
+  )
 }
 
 export function BotsPage() {
@@ -423,6 +562,7 @@ export function BotsPage() {
               />
             </label>
             {configMutation.isPending && <p className="text-sm text-ink/60 dark:text-darktext/60">Menyimpan…</p>}
+            <BotAiSettingsForm botId={configBot!.id} />
           </div>
         )}
       </Modal>

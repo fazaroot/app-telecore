@@ -28,6 +28,8 @@ pub async fn scheduler_loop(state: AppState) {
         if let Err(e) = run_due_tasks(&state).await {
             tracing::error!("Scheduler error: {e}");
         }
+        // v1.2: auto-backup terjadwal (cek jatuh tempo tiap tick).
+        crate::api::backups::maybe_run_auto_backup(&state).await;
     }
 }
 

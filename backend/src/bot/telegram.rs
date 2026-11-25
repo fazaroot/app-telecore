@@ -66,6 +66,9 @@ pub struct TelegramMessage {
     pub new_chat_members: Option<Vec<TelegramUser>>,
     #[serde(default)]
     pub left_chat_member: Option<TelegramUser>,
+    /// v1.2: pembayaran sukses (successful_payment) — isi mentah JSON.
+    #[serde(default)]
+    pub successful_payment: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +84,9 @@ pub struct Update {
     pub callback_query: Option<serde_json::Value>,
     #[serde(default)]
     pub my_chat_member: Option<serde_json::Value>,
+    /// v1.2: pre-checkout query pembayaran.
+    #[serde(default)]
+    pub pre_checkout_query: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +150,37 @@ pub struct SendMediaParams {
     pub parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SendPollParams {
+    pub chat_id: i64,
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_anonymous: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allows_multiple_answers: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type")]
+    pub poll_type: Option<String>, // "regular" | "quiz"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correct_option_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SendInvoiceParams {
+    pub chat_id: i64,
+    pub title: String,
+    pub description: String,
+    pub payload: String,
+    /// WAJIB "" untuk Telegram Stars; v1.2 tidak menyimpan provider token
+    /// nyata (lihat README v1.2).
+    pub provider_token: String,
+    pub currency: String,
+    pub prices: Vec<serde_json::Value>, // [{label, amount}]
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +405,7 @@ impl TelegramClient {
     ) -> AppResult<Vec<Update>> {
         let mut body = serde_json::json!({
             "timeout": timeout_secs,
-            "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "my_chat_member"],
+            "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "my_chat_member", "pre_checkout_query"],
         });
         if let Some(o) = offset {
             body["offset"] = serde_json::Value::from(o);
@@ -382,7 +419,7 @@ impl TelegramClient {
             "setWebhook",
             &serde_json::json!({
                 "url": url,
-                "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "my_chat_member"],
+                "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "my_chat_member", "pre_checkout_query"],
             }),
         )
         .await
@@ -486,6 +523,57 @@ impl TelegramClient {
             }),
         )
         .await
+    }
+
+    // --- Poll, sticker & pembayaran (v1.2) ---
+
+    pub async fn send_poll(
+        &self,
+        token: &str,
+        params: &SendPollParams,
+    ) -> AppResult<TelegramMessage> {
+        self.call(token, "sendPoll", params).await
+    }
+
+    pub async fn send_sticker(
+        &self,
+        token: &str,
+        chat_id: i64,
+        sticker: &str,
+    ) -> AppResult<TelegramMessage> {
+        self.call(
+            token,
+            "sendSticker",
+            &serde_json::json!({"chat_id": chat_id, "sticker": sticker}),
+        )
+        .await
+    }
+
+    /// Kirim invoice. Untuk Stars `provider_token` HARUS "" (Telegram
+    /// menolak token lain untuk XTR).
+    pub async fn send_invoice(
+        &self,
+        token: &str,
+        params: &SendInvoiceParams,
+    ) -> AppResult<TelegramMessage> {
+        self.call(token, "sendInvoice", params).await
+    }
+
+    pub async fn answer_pre_checkout_query(
+        &self,
+        token: &str,
+        pre_checkout_query_id: &str,
+        ok: bool,
+        error_message: Option<&str>,
+    ) -> AppResult<bool> {
+        let mut body = serde_json::json!({
+            "pre_checkout_query_id": pre_checkout_query_id,
+            "ok": ok,
+        });
+        if let Some(msg) = error_message {
+            body["error_message"] = serde_json::Value::String(msg.to_string());
+        }
+        self.call(token, "answerPreCheckoutQuery", &body).await
     }
 
     // --- Commands ---

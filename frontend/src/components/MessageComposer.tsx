@@ -1,8 +1,10 @@
 import { useMemo, useRef, useState } from 'react'
-import { Paperclip, Send, X } from 'lucide-react'
+import { BarChart3, Paperclip, Send, Sticker, X } from 'lucide-react'
 import type { Bot, LocalTemplate } from '../types'
-import { previewMessage } from '../api/messages'
+import { previewMessage, validatePollInput, POLL_MAX_OPTIONS, POLL_MIN_OPTIONS } from '../api/messages'
 import { KeyboardBuilder, buildKeyboardPayload, type KeyboardRows } from './KeyboardBuilder'
+
+export type ComposerKind = 'text' | 'poll' | 'sticker'
 
 export interface ComposerValue {
   botId: string
@@ -12,6 +14,15 @@ export interface ComposerValue {
   messageType: string
   keyboard?: Record<string, unknown>
   media?: { type: string; name: string; data_url: string }
+  kind: ComposerKind
+  poll?: {
+    question: string
+    options: string[]
+    isQuiz: boolean
+    correctOptionId?: number
+    explanation?: string
+  }
+  sticker?: string
 }
 
 const inputCls =
@@ -53,6 +64,15 @@ export function MessageComposer({
   const [text, setText] = useState('')
   const [parseMode, setParseMode] = useState<'MarkdownV2' | 'HTML' | 'none'>('none')
   const [messageType, setMessageType] = useState('text')
+  const [kind, setKind] = useState<ComposerKind>('text')
+  // Poll / kuis (v1.2)
+  const [pollQuestion, setPollQuestion] = useState('')
+  const [pollOptions, setPollOptions] = useState<string[]>(['', ''])
+  const [pollIsQuiz, setPollIsQuiz] = useState(false)
+  const [pollCorrect, setPollCorrect] = useState<number | null>(null)
+  const [pollExplanation, setPollExplanation] = useState('')
+  // Stiker (v1.2)
+  const [stickerValue, setStickerValue] = useState('')
   const [keyboardKind, setKeyboardKind] = useState<'none' | 'inline' | 'reply'>('none')
   const [keyboardRows, setKeyboardRows] = useState<KeyboardRows>([])
   const [mediaFile, setMediaFile] = useState<File | null>(null)
@@ -69,13 +89,52 @@ export function MessageComposer({
 
   const chatIdValid = /^-?\d+$/.test(chatId.trim())
 
-  const canSend = useMemo(
-    () => Boolean(botId && chatIdValid && (text.trim() || mediaFile)),
-    [botId, chatIdValid, text, mediaFile],
-  )
+  const pollError = validatePollInput({
+    question: pollQuestion,
+    options: pollOptions,
+    isQuiz: pollIsQuiz,
+    correctOptionId: pollCorrect,
+  })
+
+  const canSend = useMemo(() => {
+    if (!botId || !chatIdValid) return false
+    if (kind === 'poll') return pollError === null
+    if (kind === 'sticker') return stickerValue.trim().length > 0
+    return Boolean(text.trim() || mediaFile)
+  }, [botId, chatIdValid, kind, pollError, stickerValue, text, mediaFile])
 
   const handleSend = async () => {
     if (!canSend) return
+    if (kind === 'poll') {
+      onSend({
+        botId,
+        chatId: chatId.trim(),
+        text: '',
+        parseMode: 'none',
+        messageType: pollIsQuiz ? 'quiz' : 'poll',
+        kind: 'poll',
+        poll: {
+          question: pollQuestion.trim(),
+          options: pollOptions.map((o) => o.trim()).filter(Boolean),
+          isQuiz: pollIsQuiz,
+          correctOptionId: pollIsQuiz && pollCorrect !== null ? pollCorrect : undefined,
+          explanation: pollIsQuiz && pollExplanation.trim() ? pollExplanation.trim() : undefined,
+        },
+      })
+      return
+    }
+    if (kind === 'sticker') {
+      onSend({
+        botId,
+        chatId: chatId.trim(),
+        text: '',
+        parseMode: 'none',
+        messageType: 'sticker',
+        kind: 'sticker',
+        sticker: stickerValue.trim(),
+      })
+      return
+    }
     let media: ComposerValue['media']
     if (mediaFile) {
       try {
@@ -91,6 +150,7 @@ export function MessageComposer({
       text: text.trim(),
       parseMode,
       messageType: mediaFile ? messageType : 'text',
+      kind: 'text',
       keyboard: buildKeyboardPayload(keyboardKind, keyboardRows),
       media,
     })
@@ -101,6 +161,12 @@ export function MessageComposer({
     setMediaFile(null)
     setKeyboardRows([])
     setKeyboardKind('none')
+    setPollQuestion('')
+    setPollOptions(['', ''])
+    setPollIsQuiz(false)
+    setPollCorrect(null)
+    setPollExplanation('')
+    setStickerValue('')
   }
 
   return (
@@ -136,6 +202,148 @@ export function MessageComposer({
         </label>
       </div>
 
+      {/* Jenis kiriman: teks / poll / stiker (v1.2) */}
+      <div className="flex gap-2">
+        {(
+          [
+            { key: 'text', label: 'Pesan Teks' },
+            { key: 'poll', label: 'Poll / Kuis' },
+            { key: 'sticker', label: 'Stiker' },
+          ] as const
+        ).map((k) => (
+          <button
+            key={k.key}
+            type="button"
+            onClick={() => setKind(k.key)}
+            className={`rounded-full px-3 py-1.5 text-sm font-semibold ${
+              kind === k.key ? 'bg-primary text-white' : 'bg-ink/10 dark:bg-darktext/10'
+            }`}
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+
+      {kind === 'poll' && (
+        <div className="space-y-3 rounded-xl border border-ink/10 p-3 dark:border-darktext/10">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <BarChart3 className="h-4 w-4" /> Poll / Kuis
+          </p>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium">Pertanyaan</span>
+            <input
+              value={pollQuestion}
+              onChange={(e) => setPollQuestion(e.target.value)}
+              placeholder="mis. Kapan jadwal live berikutnya?"
+              className={inputCls}
+            />
+          </label>
+          <div>
+            <p className="mb-1 text-sm font-medium">
+              Opsi jawaban ({pollOptions.filter((o) => o.trim()).length} dari {POLL_MIN_OPTIONS}–{POLL_MAX_OPTIONS})
+            </p>
+            <div className="space-y-2">
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  {pollIsQuiz && (
+                    <input
+                      type="radio"
+                      name="poll-correct"
+                      checked={pollCorrect === i}
+                      onChange={() => setPollCorrect(i)}
+                      aria-label={`Opsi ${i + 1} adalah jawaban benar`}
+                      className="h-4 w-4 shrink-0 accent-primary"
+                    />
+                  )}
+                  <input
+                    value={opt}
+                    onChange={(e) =>
+                      setPollOptions((prev) => prev.map((o, j) => (j === i ? e.target.value : o)))
+                    }
+                    placeholder={`Opsi ${i + 1}`}
+                    className={inputCls}
+                  />
+                  {pollOptions.length > POLL_MIN_OPTIONS && (
+                    <button
+                      type="button"
+                      aria-label={`Hapus opsi ${i + 1}`}
+                      onClick={() => {
+                        setPollOptions((prev) => prev.filter((_, j) => j !== i))
+                        setPollCorrect((prev) => (prev === i ? null : prev !== null && prev > i ? prev - 1 : prev))
+                      }}
+                      className="shrink-0 rounded-full p-1.5 text-danger hover:bg-danger/10"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {pollOptions.length < POLL_MAX_OPTIONS && (
+              <button
+                type="button"
+                onClick={() => setPollOptions((prev) => [...prev, ''])}
+                className="mt-2 rounded-full bg-ink/10 px-3 py-1.5 text-sm font-semibold dark:bg-darktext/10"
+              >
+                + Tambah opsi
+              </button>
+            )}
+          </div>
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">Mode kuis (satu jawaban benar)</span>
+            <input
+              type="checkbox"
+              checked={pollIsQuiz}
+              onChange={(e) => {
+                setPollIsQuiz(e.target.checked)
+                if (!e.target.checked) setPollCorrect(null)
+              }}
+              className="h-5 w-5 accent-primary"
+            />
+          </label>
+          {pollIsQuiz && (
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium">Penjelasan jawaban (opsional)</span>
+              <input
+                value={pollExplanation}
+                onChange={(e) => setPollExplanation(e.target.value)}
+                placeholder="Penjelasan yang muncul setelah menjawab"
+                className={inputCls}
+              />
+            </label>
+          )}
+          {pollIsQuiz && (
+            <p className="text-xs text-ink/50 dark:text-darktext/50">
+              Pilih tombol radio di samping opsi untuk menandai jawaban benar.
+            </p>
+          )}
+          {pollError && <p className="text-sm text-danger">{pollError}</p>}
+        </div>
+      )}
+
+      {kind === 'sticker' && (
+        <div className="space-y-3 rounded-xl border border-ink/10 p-3 dark:border-darktext/10">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <Sticker className="h-4 w-4" /> Stiker
+          </p>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium">File ID stiker atau URL .webp</span>
+            <input
+              value={stickerValue}
+              onChange={(e) => setStickerValue(e.target.value)}
+              placeholder="mis. CAACAgIAAxkBAAI… atau https://…/sticker.webp"
+              className={inputCls}
+            />
+            <span className="mt-1 block text-xs text-ink/50 dark:text-darktext/50">
+              File ID didapat dari stiker yang pernah diterima bot; URL harus mengarah ke file .webp
+              stiker Telegram.
+            </span>
+          </label>
+        </div>
+      )}
+
+      {kind === 'text' && (
+        <>
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={messageType}
@@ -337,6 +545,8 @@ export function MessageComposer({
           Template disimpan di perangkat ini saja (template lokal perangkat), tidak tersimpan di server.
         </span>
       </div>
+        </>
+      )}
 
       <button
         type="button"
@@ -348,7 +558,7 @@ export function MessageComposer({
         className="flex w-full items-center justify-center gap-2 rounded-full bg-primary py-3 text-sm font-bold text-white disabled:opacity-50"
       >
         <Send className="h-4 w-4" />
-        {sending ? 'Mengirim…' : 'Kirim pesan'}
+        {sending ? 'Mengirim…' : kind === 'poll' ? 'Kirim Poll' : kind === 'sticker' ? 'Kirim Stiker' : 'Kirim pesan'}
       </button>
     </div>
   )

@@ -74,6 +74,9 @@ async fn main() -> anyhow::Result<()> {
     // Scheduler: loop tiap 10 detik.
     tokio::spawn(scheduler::scheduler_loop(state.clone()));
 
+    // Watchdog (v1.2): cek getMe tiap interval (default 5 menit).
+    tokio::spawn(services::watchdog::watchdog_loop(state.clone()));
+
     // Long polling untuk bot aktif (polling_enabled, bukan webhook).
     bot::start_polling_for_active_bots(&state).await;
 

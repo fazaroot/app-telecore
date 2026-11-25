@@ -33,7 +33,30 @@ Server mendengarkan `TELECORE_HOST:TELECORE_PORT` (default `127.0.0.1:8080`).
 | `TELECORE_ENCRYPTION_KEY` | _(generate otomatis)_ | Kunci AES-256-GCM untuk token bot: hex 64 karakter atau base64 44 karakter. Bila tidak diset, kunci digenerate sekali dan disimpan ke `telecore.key` (mode 0600). **Backup file/kunci ini** — tanpanya token terenkripsi tidak bisa didekripsi. |
 | `RUST_LOG` | `info` | Level log |
 
-Migrasi database dijalankan otomatis saat server start (`sqlx::migrate!`, 15 tabel).
+Migrasi database dijalankan otomatis saat server start (`sqlx::migrate!`, 19 tabel di v1.2).
+
+## API v1.2 (baru)
+
+| Area | Endpoint |
+|---|---|
+| Inbox | `GET /api/inbox` (query `bot_id` opsional), `GET /api/inbox/{chat_id}` (query `bot_id` opsional; menandai pesan masuk terbaca), `POST /api/inbox/{chat_id}/reply` body `{text, parse_mode?, bot_id?}` |
+| AI providers | `GET/POST /api/ai-providers`, `GET/PUT/DELETE /api/ai-providers/{id}`, `POST /api/ai-providers/{id}/test`, `PUT /api/bots/{id}/ai` body `{ai_provider_id, ai_enabled, ai_allow_groups, ai_system_prompt, ai_max_tokens, ai_temperature}` |
+| Watchdog | `GET /api/watchdog/status`, `PUT /api/watchdog/settings` body `{interval_minutes (1..60), auto_restart}` |
+| Payments / Stars | `GET/POST /api/payments/products`, `PUT/DELETE /api/payments/products/{id}`, `GET /api/payments/orders` (query `bot_id`, `status`), `POST /api/payments/{product_id}/invoice` body `{chat_id}` |
+| Channel | `GET /api/channels`, `POST /api/channels/{chat_id}/post` body `{bot_id, text, parse_mode?}`, `POST /api/channels/{chat_id}/schedule` body `{bot_id, text, run_at (RFC3339), parse_mode?}` |
+| Poll & sticker | `POST /api/messages/poll` body `{bot_id, chat_id, question, options[2..10], is_quiz, correct_option_id?, explanation?}`, `POST /api/messages/sticker` body `{bot_id, chat_id, sticker}` |
+| Auto-backup | `GET/PUT /api/backups/auto-settings` body `{enabled, frequency ('daily'\|'weekly'), hour (0..23 UTC), retention}` |
+
+### v1.2 — keputusan desain & batasan
+
+- **AI Smart Reply**: provider `openai_compatible` / `anthropic` / `gemini`; API key write-only, terenkripsi AES-256-GCM, respons hanya `api_key_last4`. Guardrail: hanya chat privat kecuali `ai_allow_groups=1`; pesan dari bot diabaikan; rate limit 10 balasan per (bot, user) per jam (`ai_usage`, cek+increment atomik satu statement); maks 1 balasan per pesan masuk; anti-loop = AI tidak membalas ulang pesan yang sudah dijawabnya (`reply_to_message_id` sama, mis. update di-deliver ulang / pesan diedit). AI hanya jalan bila command kustom / keyword workflow tidak cocok (dicek via DB: command aktif + keyword workflow aktif). Bila provider error: tidak ada pesan error ke user, hanya `activity_logs` (`ai_reply` / `ai_reply_rate_limited`).
+- **Watchdog**: loop background, cek pertama 60 detik setelah start, lalu tiap interval (default 5 menit, `app_settings` `watchdog_interval_minutes` / `watchdog_auto_restart`). `getMe` per bot aktif; gagal → notifikasi + `activity_logs` + `consecutive_failures+1`. Auto-restart = `PollingManager::stop` lalu `start` (task lama di-abort, task baru jalan), maks 3 percobaan jeda 10 detik, verifikasi dengan `getMe` ulang; bila tetap gagal → `connection_status='error'`. Bila auto-restart mati, status tidak otomatis jadi `'error'` (kegagalan tetap tercatat di failures + notifikasi). Freshness polling: bila tidak ada data, bot dianggap ok selama `getMe` sukses.
+- **Stars & Payments**: invoice memakai `provider_token` `""` (wajib kosong untuk Stars). **Provider token nyata untuk fiat tidak disimpan di v1.2** — invoice non-XTR tetap dikirim dengan `provider_token ""`; pembayaran fiat nyata membutuhkan provider payment token dari BotFather (belum didukung). `pre_checkout_query` selalu dijawab `ok=true`. `successful_payment` mencocokkan order via `invoice_payload` persis (`{product_payload}#{order_id}`).
+- **Channel terjadwal**: dibuat sebagai `scheduled_task` one-time (`target_type='channel'`, `target_id=<chat_id>`) dan dieksekusi scheduler yang ada; `parse_mode` tidak disimpan di `scheduled_tasks` v1 — posting terjadwal dikirim sebagai teks biasa (dicatat di deskripsi task).
+- **Auto-backup**: jam memakai **UTC** (bukan timezone lokal). Passphrase digenerate sekali (hex 32 karakter) bila belum ada, disimpan terenkripsi master key di `app_settings` `auto_backup_passphrase_enc`. `last_auto_backup_at` ditandai sebelum backup jalan agar tidak dobel dalam jam yang sama; retensi hanya menghapus generasi otomatis (`is_automatic=1`), backup manual tidak pernah dihapus otomatis.
+- **Inbox**: pesan masuk tersimpan `is_read=0`, pesan keluar `is_read=1`; membuka percakapan menandai semua pesan masuk chat itu terbaca. `GET /api/inbox/{chat_id}` tanpa `bot_id` memakai bot dari pesan terbaru di chat itu.
+
+## Batasan yang diketahui (v1)
 
 ## API ringkas
 

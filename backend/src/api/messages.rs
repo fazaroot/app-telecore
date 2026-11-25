@@ -735,6 +735,164 @@ pub async fn retry_message(
 }
 
 // ---------------------------------------------------------------------------
+// v1.2: Poll, quiz & sticker
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SendPollRequest {
+    pub bot_id: String,
+    #[serde(deserialize_with = "crate::models::de_chat_id")]
+    pub chat_id: i64,
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub is_quiz: bool,
+    pub correct_option_id: Option<i64>,
+    pub explanation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendStickerRequest {
+    pub bot_id: String,
+    #[serde(deserialize_with = "crate::models::de_chat_id")]
+    pub chat_id: i64,
+    /// file_id Telegram atau URL .webp.
+    pub sticker: String,
+}
+
+/// Validasi poll (murni, diuji unit): 2..10 opsi, quiz butuh jawaban benar.
+pub fn validate_poll(question: &str, options: &[String], is_quiz: bool, correct_option_id: Option<i64>) -> AppResult<()> {
+    if question.trim().is_empty() {
+        return Err(AppError::Validation("question tidak boleh kosong".to_string()));
+    }
+    if question.chars().count() > 300 {
+        return Err(AppError::Validation("question maksimal 300 karakter".to_string()));
+    }
+    if options.len() < 2 || options.len() > 10 {
+        return Err(AppError::Validation("options harus berisi 2..10 item".to_string()));
+    }
+    if options.iter().any(|o| o.trim().is_empty()) {
+        return Err(AppError::Validation("options tidak boleh ada yang kosong".to_string()));
+    }
+    if is_quiz {
+        let Some(c) = correct_option_id else {
+            return Err(AppError::Validation(
+                "quiz membutuhkan correct_option_id".to_string(),
+            ));
+        };
+        if c < 0 || c as usize >= options.len() {
+            return Err(AppError::Validation(
+                "correct_option_id di luar rentang options".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub async fn send_poll(
+    State(state): State<AppState>,
+    Json(req): Json<SendPollRequest>,
+) -> AppResult<Json<Envelope<Message>>> {
+    validate_poll(&req.question, &req.options, req.is_quiz, req.correct_option_id)?;
+    let token = get_bot_token(&state, &req.bot_id).await?;
+    let sent = state
+        .telegram
+        .send_poll(&token, &crate::bot::telegram::SendPollParams {
+            chat_id: req.chat_id,
+            question: req.question.clone(),
+            options: req.options.clone(),
+            is_anonymous: Some(true),
+            allows_multiple_answers: Some(false),
+            poll_type: Some(if req.is_quiz { "quiz".to_string() } else { "regular".to_string() }),
+            correct_option_id: if req.is_quiz { req.correct_option_id } else { None },
+            explanation: req.explanation.clone(),
+        })
+        .await;
+    match sent {
+        Ok(tg) => {
+            let saved = save_outbound_message(
+                &state,
+                &req.bot_id,
+                req.chat_id,
+                "poll",
+                Some(req.question.clone()),
+                None,
+                "sent",
+                Some(tg.message_id),
+                None,
+                None,
+            )
+            .await?;
+            Ok(Envelope::ok(saved))
+        }
+        Err(e) => {
+            let _ = save_outbound_message(
+                &state,
+                &req.bot_id,
+                req.chat_id,
+                "poll",
+                Some(req.question.clone()),
+                None,
+                "failed",
+                None,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            Err(e)
+        }
+    }
+}
+
+pub async fn send_sticker(
+    State(state): State<AppState>,
+    Json(req): Json<SendStickerRequest>,
+) -> AppResult<Json<Envelope<Message>>> {
+    if req.sticker.trim().is_empty() {
+        return Err(AppError::Validation("sticker tidak boleh kosong".to_string()));
+    }
+    let token = get_bot_token(&state, &req.bot_id).await?;
+    let sent = state
+        .telegram
+        .send_sticker(&token, req.chat_id, req.sticker.trim())
+        .await;
+    match sent {
+        Ok(tg) => {
+            let saved = save_outbound_message(
+                &state,
+                &req.bot_id,
+                req.chat_id,
+                "sticker",
+                Some(req.sticker.clone()),
+                Some(req.sticker.clone()),
+                "sent",
+                Some(tg.message_id),
+                None,
+                None,
+            )
+            .await?;
+            Ok(Envelope::ok(saved))
+        }
+        Err(e) => {
+            let _ = save_outbound_message(
+                &state,
+                &req.bot_id,
+                req.chat_id,
+                "sticker",
+                Some(req.sticker.clone()),
+                Some(req.sticker.clone()),
+                "failed",
+                None,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // v1.1: Search + template preview + broadcast
 // ---------------------------------------------------------------------------
 
@@ -1085,5 +1243,29 @@ mod tests {
         let bytes = decode_data_url("data:image/png;base64,aGk=").unwrap();
         assert_eq!(bytes, b"hi");
         assert!(decode_data_url("data:image/png;base64,!!!").is_err());
+    }
+
+    #[test]
+    fn poll_validation_requires_2_to_10_options() {
+        assert!(validate_poll("Q?", &["a".to_string()], false, None).is_err());
+        assert!(validate_poll(
+            "Q?",
+            &["a".to_string(), "b".to_string()],
+            false,
+            None
+        )
+        .is_ok());
+        let ten: Vec<String> = (0..10).map(|i| format!("o{i}")).collect();
+        assert!(validate_poll("Q?", &ten, false, None).is_ok());
+        let eleven: Vec<String> = (0..11).map(|i| format!("o{i}")).collect();
+        assert!(validate_poll("Q?", &eleven, false, None).is_err());
+    }
+
+    #[test]
+    fn poll_validation_quiz_needs_valid_correct_option() {
+        let opts = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_poll("Q?", &opts, true, None).is_err());
+        assert!(validate_poll("Q?", &opts, true, Some(5)).is_err());
+        assert!(validate_poll("Q?", &opts, true, Some(1)).is_ok());
     }
 }

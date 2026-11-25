@@ -2,6 +2,7 @@ import { apiDownload, apiRequest, asArray } from './client'
 import type {
   AnalyticsSummary,
   AppSettings,
+  AutoBackupSettings,
   Backup,
   NotificationItem,
   PerBotStat,
@@ -96,6 +97,20 @@ export async function restoreBackup(id: string | number, passphrase: string): Pr
 
 export async function deleteBackup(id: string | number): Promise<void> {
   await apiRequest(`/api/backups/${id}`, { method: 'DELETE' })
+}
+
+// --- v1.2: Auto-backup terjadwal ---
+
+export async function fetchAutoBackupSettings(): Promise<AutoBackupSettings> {
+  const data = await apiRequest<unknown>('/api/backups/auto-settings')
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return data as AutoBackupSettings
+  }
+  return {}
+}
+
+export async function updateAutoBackupSettings(settings: AutoBackupSettings): Promise<AutoBackupSettings> {
+  return apiRequest<AutoBackupSettings>('/api/backups/auto-settings', { method: 'PUT', body: settings })
 }
 
 export async function fetchAppSettings(): Promise<AppSettings> {

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, ArrowDownLeft, ArrowUpRight, Bot, CheckCircle2, Server, Users, Workflow, XCircle } from 'lucide-react'
+import { Activity, ArrowDownLeft, ArrowUpRight, Bot, CheckCircle2, HeartPulse, Server, Users, Workflow, XCircle } from 'lucide-react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { fetchHealth, fetchBots } from '../api/bots'
+import { fetchWatchdogStatus, isWatchdogFailing, watchdogOverallStatus } from '../api/watchdog'
 import { fetchAnalyticsSummary } from '../api/misc'
 import { fetchWorkflows } from '../api/automation'
 import { fetchMessages } from '../api/messages'
@@ -36,6 +37,7 @@ export function DashboardPage() {
   const analyticsQuery = useQuery({ queryKey: ['analytics', 'summary'], queryFn: () => fetchAnalyticsSummary(), refetchInterval: wsStatus === 'open' ? false : 10_000 })
   const workflowsQuery = useQuery({ queryKey: ['workflows'], queryFn: () => fetchWorkflows(), refetchInterval: wsStatus === 'open' ? false : 10_000 })
   const messagesQuery = useQuery({ queryKey: ['messages', 'recent'], queryFn: () => fetchMessages({}), refetchInterval: wsStatus === 'open' ? false : 10_000 })
+  const watchdogQuery = useQuery({ queryKey: ['watchdog', 'status'], queryFn: fetchWatchdogStatus, refetchInterval: 60_000 })
 
   const bots = botsQuery.data ?? []
   const analytics = analyticsQuery.data
@@ -183,6 +185,73 @@ export function DashboardPage() {
             </dd>
           </div>
         </dl>
+      </Card>
+
+      <Card>
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 font-bold">
+            <HeartPulse className="h-4 w-4" /> Bot Watchdog
+          </h2>
+          {(() => {
+            const overall = watchdogOverallStatus(watchdogQuery.data?.bots ?? [])
+            return (
+              <Badge tone={overall === 'sehat' ? 'success' : overall === 'gagal' ? 'danger' : 'default'}>
+                {overall === 'sehat' ? 'Semua bot sehat' : overall === 'gagal' ? 'Ada bot bermasalah' : 'Belum ada data'}
+              </Badge>
+            )
+          })()}
+        </div>
+        {watchdogQuery.isLoading ? (
+          <LoadingSpinner label="Memeriksa watchdog…" />
+        ) : watchdogQuery.isError ? (
+          <ErrorState
+            message={(watchdogQuery.error as Error).message}
+            onRetry={() => void watchdogQuery.refetch()}
+          />
+        ) : (watchdogQuery.data?.bots ?? []).length === 0 ? (
+          <EmptyState
+            title="Belum ada bot yang diawasi"
+            description="Watchdog memeriksa koneksi setiap bot secara berkala dan bisa me-restart bot yang gagal."
+          />
+        ) : (
+          <dl className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <dt className="text-ink/60 dark:text-darktext/60">Terakhir dicek</dt>
+              <dd className="font-medium">
+                {watchdogQuery.data?.last_check_at
+                  ? new Date(watchdogQuery.data.last_check_at).toLocaleString('id-ID')
+                  : '—'}
+              </dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-ink/60 dark:text-darktext/60">Interval pengecekan</dt>
+              <dd className="font-medium">{watchdogQuery.data?.interval_minutes ?? '—'} menit</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-ink/60 dark:text-darktext/60">Auto-restart</dt>
+              <dd className="font-medium">{watchdogQuery.data?.auto_restart ? 'Aktif' : 'Nonaktif'}</dd>
+            </div>
+            <ul className="space-y-2 border-t border-ink/10 pt-2 dark:border-darktext/10">
+              {(watchdogQuery.data?.bots ?? []).map((b) => (
+                <li key={String(b.bot_id ?? b.username)} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{b.username ? `@${b.username}` : `Bot ${b.bot_id ?? '—'}`}</p>
+                    <p className="text-xs text-ink/50 dark:text-darktext/50">
+                      Gagal beruntun: {b.consecutive_failures ?? 0}
+                      {b.last_error ? ` · ${b.last_error}` : ''}
+                    </p>
+                  </div>
+                  <Badge tone={isWatchdogFailing(b) ? 'danger' : 'success'}>
+                    {b.status ?? (isWatchdogFailing(b) ? 'gagal' : 'sehat')}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </dl>
+        )}
+        <p className="mt-2 text-xs text-ink/50 dark:text-darktext/50">
+          Status diperbarui otomatis tiap 60 detik. Interval dan auto-restart diatur di Settings.
+        </p>
       </Card>
 
       <Card>

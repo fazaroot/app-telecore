@@ -37,6 +37,13 @@ export interface BotConfig {
   polling_enabled?: boolean
   webhook_url?: string | null
   webhook_enabled?: boolean
+  // v1.2: konfigurasi AI per bot (ada di BotConfiguration, bukan di Bot)
+  ai_provider_id?: string | number | null
+  ai_enabled?: boolean
+  ai_allow_groups?: boolean
+  ai_system_prompt?: string
+  ai_max_tokens?: number
+  ai_temperature?: number
   [key: string]: unknown
 }
 
@@ -256,6 +263,127 @@ export interface Backup {
   size?: number
   size_bytes?: number
   created_at?: string
+  is_automatic?: boolean | number
+}
+
+// --- v1.2: Inbox ---
+
+export interface InboxConversation {
+  chat_id: string | number
+  title?: string
+  username?: string | null
+  first_name?: string
+  chat_type?: string
+  last_message_text?: string
+  last_message_at?: string
+  unread_count?: number
+}
+
+export interface InboxMessage {
+  id?: string | number
+  chat_id?: string | number
+  direction?: 'in' | 'out' | 'inbound' | 'outbound' | string
+  text?: string
+  content?: string
+  message_type?: string
+  created_at?: string
+  telegram_message_id?: number | string
+}
+
+export interface InboxThread {
+  chat?: InboxConversation
+  messages?: InboxMessage[]
+}
+
+// --- v1.2: Bot Watchdog ---
+
+export interface WatchdogBotStatus {
+  bot_id?: string | number
+  username?: string
+  status?: string
+  last_check_at?: string
+  consecutive_failures?: number
+  last_error?: string | null
+}
+
+export interface WatchdogStatus {
+  last_check_at?: string
+  interval_minutes?: number
+  auto_restart?: boolean
+  bots?: WatchdogBotStatus[]
+}
+
+export interface WatchdogSettings {
+  interval_minutes: number
+  auto_restart: boolean
+}
+
+// --- v1.2: AI Providers ---
+
+export type AiProviderType = 'openai_compatible' | 'anthropic' | 'gemini'
+
+export interface AiProvider {
+  id: string | number
+  name?: string
+  provider_type?: AiProviderType | string
+  base_url?: string
+  model?: string
+  api_key_last4?: string | null
+  enabled?: boolean
+  created_at?: string
+}
+
+export interface BotAiSettings {
+  ai_provider_id?: string | number | null
+  ai_enabled?: boolean
+  ai_allow_groups?: boolean
+  ai_system_prompt?: string
+  ai_max_tokens?: number
+  ai_temperature?: number
+}
+
+// --- v1.2: Telegram Stars & Payments ---
+
+export interface PaymentProduct {
+  id: string | number
+  bot_id?: string | number
+  title?: string
+  name?: string
+  description?: string | null
+  price?: number
+  amount?: number
+  currency?: string
+  payload?: string
+  created_at?: string
+}
+
+export interface PaymentOrder {
+  id: string | number
+  product_id?: string | number
+  chat_id?: string | number
+  amount?: number
+  price?: number
+  currency?: string
+  status?: 'pending' | 'paid' | 'failed' | 'cancelled' | string
+  created_at?: string
+}
+
+// --- v1.2: Channels ---
+
+export interface Channel {
+  chat_id: string | number
+  title?: string
+  bot_id?: string | number
+  bot_username?: string
+}
+
+// --- v1.2: Auto-backup ---
+
+export interface AutoBackupSettings {
+  enabled?: boolean
+  frequency?: 'daily' | 'weekly' | string
+  hour?: number
+  retention?: number
 }
 
 export interface AppSettings {
