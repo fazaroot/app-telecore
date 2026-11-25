@@ -30,11 +30,16 @@ pub fn validate_create_bot(name: &str, token: &str) -> AppResult<()> {
     if name.trim().is_empty() {
         return Err(AppError::Validation("nama bot tidak boleh kosong".to_string()));
     }
-    if token.trim().is_empty() {
+    validate_token_format(token)
+}
+
+/// Validasi format token Telegram: <id-numerik>:<secret>. Sengaja longgar
+/// di sini — validasi sebenarnya dilakukan via getMe ke api.telegram.org.
+pub fn validate_token_format(token: &str) -> AppResult<()> {
+    let token = token.trim();
+    if token.is_empty() {
         return Err(AppError::Validation("token bot tidak boleh kosong".to_string()));
     }
-    // Format token Telegram: <id-numerik>:<secret>. Sengaja longgar di sini —
-    // validasi sebenarnya dilakukan via getMe ke api.telegram.org.
     let Some((id_part, secret)) = token.split_once(':') else {
         return Err(AppError::Validation(
             "format token tidak valid: harus <id>:<secret>".to_string(),
@@ -49,6 +54,23 @@ pub fn validate_create_bot(name: &str, token: &str) -> AppResult<()> {
         return Err(AppError::Validation(
             "format token tidak valid: bagian secret kosong".to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Pastikan token baru milik bot yang sama: telegram_id hasil getMe harus
+/// sama dengan bot yang ada. Bot tanpa telegram_id (mis. hasil import
+/// yang belum pernah terhubung) menerima identitas dari getMe.
+pub fn ensure_token_identity(
+    existing_telegram_id: Option<i64>,
+    me: &crate::bot::telegram::TelegramUser,
+) -> AppResult<()> {
+    if let Some(existing) = existing_telegram_id {
+        if existing != me.id {
+            return Err(AppError::Conflict(
+                "token baru milik bot Telegram lain: telegram_id token baru tidak sama dengan bot ini; ganti token hanya untuk bot yang sama".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -69,6 +91,8 @@ pub struct UpdateBotRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub is_active: Option<bool>,
+    /// Token baru (opsional). Kosong/whitespace = tidak mengganti token.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,7 +245,8 @@ pub async fn create_bot(
                 .execute(&state.pool)
                 .await;
             return Err(AppError::Telegram(format!(
-                "token tidak valid atau Telegram tidak dapat dihubungi: {e}"
+                "token tidak valid atau Telegram tidak dapat dihubungi: {}",
+                crate::security::redact::redact_known_secret(&e.to_string(), &token)
             )));
         }
     }
@@ -268,18 +293,91 @@ pub async fn update_bot(
     if let Some(active) = req.is_active {
         bot.is_active = if active { 1 } else { 0 };
     }
+
+    // Ganti token (bila diisi): validasi format -> getMe -> pastikan
+    // identitas bot sama -> enkripsi. Semua divalidasi SEBELUM DB diubah,
+    // jadi token invalid/milik bot lain tidak mengubah apa pun.
+    // Token tidak pernah muncul utuh di respons/log/error.
+    let token_update = match req.token {
+        Some(raw) if !raw.trim().is_empty() => {
+            let token = raw.trim().to_string();
+            validate_token_format(&token)?;
+            let me = state.telegram.get_me(&token).await.map_err(|e| {
+                AppError::Telegram(format!(
+                    "token baru tidak valid atau Telegram tidak dapat dihubungi: {}",
+                    crate::security::redact::redact_known_secret(&e.to_string(), &token)
+                ))
+            })?;
+            ensure_token_identity(bot.telegram_id, &me)?;
+            let encrypted = state
+                .crypto
+                .encrypt(&token)
+                .map_err(|e| AppError::Internal(format!("gagal mengenkripsi token: {e}")))?;
+            let masked = Crypto::mask_token(&token);
+            Some((encrypted, masked, me))
+        }
+        _ => None,
+    };
+
     bot.updated_at = now_rfc3339();
-    sqlx::query(
-        "UPDATE bots SET name = ?, description = ?, is_active = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(&bot.name)
-    .bind(&bot.description)
-    .bind(bot.is_active)
-    .bind(&bot.updated_at)
-    .bind(&bot.id)
-    .execute(&state.pool)
-    .await?;
-    if bot.is_active == 0 {
+    if let Some((encrypted, masked, me)) = &token_update {
+        bot.token_encrypted = encrypted.clone();
+        bot.token_masked = masked.clone();
+        bot.username = me.username.clone();
+        bot.telegram_id = Some(me.id);
+        bot.status = "connected".to_string();
+        bot.consecutive_failures = 0;
+        bot.last_check_at = Some(bot.updated_at.clone());
+        sqlx::query(
+            "UPDATE bots SET name = ?, description = ?, is_active = ?, token_encrypted = ?, \
+             token_masked = ?, username = ?, telegram_id = ?, status = ?, \
+             consecutive_failures = ?, last_check_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&bot.name)
+        .bind(&bot.description)
+        .bind(bot.is_active)
+        .bind(&bot.token_encrypted)
+        .bind(&bot.token_masked)
+        .bind(&bot.username)
+        .bind(bot.telegram_id)
+        .bind(&bot.status)
+        .bind(bot.consecutive_failures)
+        .bind(&bot.last_check_at)
+        .bind(&bot.updated_at)
+        .bind(&bot.id)
+        .execute(&state.pool)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE bots SET name = ?, description = ?, is_active = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&bot.name)
+        .bind(&bot.description)
+        .bind(bot.is_active)
+        .bind(&bot.updated_at)
+        .bind(&bot.id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    let bot = fetch_bot(&state, &id).await?;
+    if token_update.is_some() {
+        log_activity(
+            &state,
+            Some(&bot.id),
+            "bot_token_updated",
+            Some("bot"),
+            Some(&bot.id),
+            json!({"token_masked": bot.token_masked, "username": bot.username}),
+            "info",
+        )
+        .await;
+        // Restart polling bot ini dengan token baru. `apply_delivery_mode`
+        // menghentikan task lama lalu menjalankan task baru bila mode
+        // polling aktif; pada mode webhook/nonaktif polling dihentikan.
+        let config = get_or_create_config(&state, &id).await?;
+        apply_delivery_mode(&state, &bot, &config).await?;
+    } else if bot.is_active == 0 {
         state.polling.stop(&bot.id).await;
     }
     Ok(Envelope::ok(bot))
@@ -728,5 +826,143 @@ mod tests {
         // Token palsu "123456:ABC-DEF" lolos validasi format — kegagalannya
         // harus ditangkap getMe (diuji di smoke test, bukan di sini).
         assert!(validate_create_bot("BotKu", "123456:ABC-DEF").is_ok());
+    }
+
+    #[test]
+    fn token_identity_rejects_other_bot() {
+        let me = crate::bot::telegram::TelegramUser {
+            id: 222222222,
+            is_bot: true,
+            first_name: "Other".to_string(),
+            last_name: None,
+            username: Some("other_bot".to_string()),
+            language_code: None,
+        };
+        assert!(ensure_token_identity(Some(111111111), &me).is_err());
+        assert!(ensure_token_identity(Some(222222222), &me).is_ok());
+        // Bot tanpa telegram_id menerima identitas getMe.
+        assert!(ensure_token_identity(None, &me).is_ok());
+    }
+
+    fn fake_token(bot_id: i64, secret_word: &str) -> String {
+        // Token sintetis yang jelas palsu, dibangun saat runtime.
+        format!("{bot_id}:{}", secret_word.repeat(5))
+    }
+
+    async fn test_state_with_fake_telegram() -> AppState {
+        use crate::bot::telegram::test_support::fake_telegram_server_with_handler;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        // getMe palsu: id bot ditentukan dari awalan id pada token.
+        let (base, _rx) = fake_telegram_server_with_handler(|req: &str| {
+            if req.contains("/getMe") {
+                if req.contains("222222222:") {
+                    "{\"ok\":true,\"result\":{\"id\":222222222,\"is_bot\":true,\"first_name\":\"Other\",\"username\":\"other_bot\"}}".to_string()
+                } else {
+                    "{\"ok\":true,\"result\":{\"id\":111111111,\"is_bot\":true,\"first_name\":\"Test\",\"username\":\"new_bot\"}}".to_string()
+                }
+            } else {
+                "{\"ok\":true,\"result\":true}".to_string()
+            }
+        });
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = crate::config::Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            database_url: "sqlite::memory:".to_string(),
+            api_key: "test-key".to_string(),
+            rust_log: "info".to_string(),
+        };
+        let crypto = std::sync::Arc::new(Crypto::from_key_bytes([9u8; 32]));
+        let old_token = fake_token(111111111, "OLDFAKE");
+        let encrypted = crypto.encrypt(&old_token).unwrap();
+        let now = now_rfc3339();
+        sqlx::query(
+            "INSERT INTO bots (id, name, username, telegram_id, token_encrypted, token_masked, status, created_at, updated_at) \
+             VALUES ('bot-1', 'Bot Test', 'old_bot', 111111111, ?, ?, 'connected', ?, ?)",
+        )
+        .bind(&encrypted)
+        .bind(Crypto::mask_token(&old_token))
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Polling dimatikan agar test tidak menjalankan task polling.
+        sqlx::query(
+            "INSERT INTO bot_configurations (id, bot_id, polling_enabled, created_at, updated_at) \
+             VALUES ('cfg-1', 'bot-1', 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let telegram = crate::bot::telegram::TelegramClient::with_base_url(base).unwrap();
+        AppState::new(pool, config, crypto, telegram)
+    }
+
+    #[tokio::test]
+    async fn update_bot_replaces_token_and_updates_masked_username() {
+        let state = test_state_with_fake_telegram().await;
+        let new_token = fake_token(111111111, "NEWFAKE");
+        let Json(envelope) = update_bot(
+            State(state.clone()),
+            Path("bot-1".to_string()),
+            Json(UpdateBotRequest {
+                name: None,
+                description: None,
+                is_active: None,
+                token: Some(new_token.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        let bot = envelope.data.unwrap();
+        assert_eq!(bot.token_masked, Crypto::mask_token(&new_token));
+        assert_eq!(bot.username.as_deref(), Some("new_bot"));
+        assert_eq!(bot.telegram_id, Some(111111111));
+        // Token utuh tidak pernah muncul di respons.
+        let serialized = serde_json::to_string(&bot).unwrap();
+        assert!(!serialized.contains(&new_token));
+        // Token baru tersimpan terenkripsi dan bisa didekripsi kembali.
+        let stored = fetch_bot(&state, "bot-1").await.unwrap();
+        assert_eq!(state.crypto.decrypt(&stored.token_encrypted).unwrap(), new_token);
+    }
+
+    #[tokio::test]
+    async fn update_bot_rejects_token_of_other_bot() {
+        let state = test_state_with_fake_telegram().await;
+        let other_token = fake_token(222222222, "OTHERFAKE");
+        let err = update_bot(
+            State(state.clone()),
+            Path("bot-1".to_string()),
+            Json(UpdateBotRequest {
+                name: None,
+                description: None,
+                is_active: None,
+                token: Some(other_token.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("bot Telegram lain"));
+        assert!(!err.to_string().contains(&other_token));
+        // DB tidak berubah.
+        let stored = fetch_bot(&state, "bot-1").await.unwrap();
+        assert_eq!(stored.username.as_deref(), Some("old_bot"));
+        assert_eq!(
+            stored.token_masked,
+            Crypto::mask_token(&fake_token(111111111, "OLDFAKE"))
+        );
     }
 }

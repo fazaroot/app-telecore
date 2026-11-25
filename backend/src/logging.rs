@@ -111,13 +111,20 @@ impl<S: Subscriber> Layer<S> for LogLayer {
             fields: Vec::new(),
         };
         event.record(&mut visitor);
-        let message = visitor.message.unwrap_or_default();
+        // Redaksi sebelum masuk ring buffer/broadcast/WebSocket: log
+        // tidak boleh mengandung token bot atau secret lain.
+        let message = crate::security::redact::redact_secrets(&visitor.message.unwrap_or_default());
+        let fields: Vec<(String, String)> = visitor
+            .fields
+            .into_iter()
+            .map(|(k, v)| (k, crate::security::redact::redact_secrets(&v)))
+            .collect();
         // Abaikan event kosong (mis. dari span tanpa pesan) agar ring tidak
         // dipenuhi baris tanpa isi.
-        if message.is_empty() && visitor.fields.is_empty() {
+        if message.is_empty() && fields.is_empty() {
             return;
         }
-        let line = Self::format_line(&level, &message, &visitor.fields);
+        let line = Self::format_line(&level, &message, &fields);
         self.push_line(line, &level, &message);
     }
 }

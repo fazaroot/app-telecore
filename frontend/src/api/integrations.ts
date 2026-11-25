@@ -84,7 +84,7 @@ export async function testMcpConnection(mcpPath = '/mcp'): Promise<unknown> {
       params: {
         protocolVersion: '2024-11-05',
         capabilities: {},
-        clientInfo: { name: 'TeleCore', version: '1.3.0' },
+        clientInfo: { name: 'TeleCore', version: '1.4.0' },
       },
     },
   })

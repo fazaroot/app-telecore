@@ -139,80 +139,11 @@ pub async fn rate_limit_middleware(
 // Redaksi log: jangan pernah menulis token/secret ke log.
 // ---------------------------------------------------------------------------
 
-/// Masking nilai sensitif dalam string log: pola `token=...`, `api_key=...`,
-/// `X-API-Key: ...`, dan token bot Telegram (`digits:alphanum`).
+/// Masking nilai sensitif dalam string log. Implementasi terpusat di
+/// `security::redact` agar pola redaksi yang sama dipakai error Telegram,
+/// notifikasi, activity log, dan serialisasi API.
 pub fn sanitize_log(input: &str) -> String {
-    let mut out = input.to_string();
-    for key in ["token", "api_key", "api-key", "x-api-key", "passphrase", "pin"] {
-        out = mask_after_key(&out, key);
-    }
-    // Pola token bot Telegram: <angka>:<35+ karakter alfanumerik/_/->
-    out = mask_bot_token_pattern(&out);
-    out
-}
-
-fn mask_after_key(input: &str, key: &str) -> String {
-    let mut result = input.to_string();
-    let mut search_from = 0usize;
-    loop {
-        if search_from >= result.len() {
-            break;
-        }
-        let lower = result[search_from..].to_lowercase();
-        let Some(rel) = lower.find(key) else {
-            break;
-        };
-        let key_pos = search_from + rel;
-        // Hanya mask bila key diikuti separator key=value (`=` atau `:`),
-        // agar kata seperti "mapping" tidak ikut termask.
-        let after_key = &result[key_pos + key.len()..];
-        let after_spaces = after_key.trim_start_matches(' ');
-        if !after_spaces.starts_with('=') && !after_spaces.starts_with(':') {
-            search_from = key_pos + key.len();
-            continue;
-        }
-        let trimmed = after_key.trim_start_matches([' ', '=', ':', '"', '\'']);
-        let skip = after_key.len() - trimmed.len();
-        let value_start = key_pos + key.len() + skip;
-        let rest = &result[value_start..];
-        let value_len = rest
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
-            .unwrap_or(rest.len());
-        if value_len > 0 && &rest[..value_len] != "****" {
-            result.replace_range(value_start..value_start + value_len, "****");
-            search_from = value_start + 4;
-        } else {
-            search_from = key_pos + key.len();
-        }
-    }
-    result
-}
-
-fn mask_bot_token_pattern(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        // Cari <digit+>:<35+ alnum/_/->
-        let mut j = i;
-        while j < chars.len() && chars[j].is_ascii_digit() {
-            j += 1;
-        }
-        if j > i && j < chars.len() && chars[j] == ':' {
-            let mut k = j + 1;
-            while k < chars.len() && (chars[k].is_ascii_alphanumeric() || chars[k] == '_' || chars[k] == '-') {
-                k += 1;
-            }
-            if k - (j + 1) >= 20 {
-                out.push_str("****");
-                i = k;
-                continue;
-            }
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
+    crate::security::redact::redact_secrets(input)
 }
 
 #[cfg(test)]
@@ -232,11 +163,12 @@ mod tests {
 
     #[test]
     fn sanitize_masks_secrets() {
-        let s = sanitize_log("token=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11 dan api_key=rahasia");
+        let fake = format!("token={}:{}rahasia{}", "123456789", "A".repeat(20), "B".repeat(10));
+        let s = sanitize_log(&fake);
         assert!(!s.contains("123456"));
         assert!(!s.contains("rahasia"));
         assert!(s.contains("****"));
-        let s2 = sanitize_log("error dari bot 987654321:AAHxxYyZz1234567890abcdefghij");
+        let s2 = sanitize_log(&format!("error dari bot {}:{}", "987654321", "C".repeat(35)));
         assert!(!s2.contains("987654321"));
     }
 }

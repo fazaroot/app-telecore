@@ -84,7 +84,7 @@ export interface TelegramUser {
   telegram_id?: number | string
   telegram_user_id?: number | string
   username?: string | null
-  first_name?: string
+  first_name?: string | null
   last_name?: string | null
   notes?: string | null
   labels?: string[]
@@ -229,7 +229,7 @@ export interface Workflow {
   name?: string
   trigger_type?: string
   trigger_config?: Record<string, unknown>
-  conditions?: WorkflowCondition[]
+  conditions?: WorkflowConditions
   actions?: WorkflowAction[]
   is_enabled?: boolean
   created_at?: string
@@ -239,13 +239,31 @@ export interface Workflow {
 export interface WorkflowCondition {
   field?: string
   operator?: string
-  value?: string
+  value?: string | number
+  [key: string]: unknown
 }
+
+/**
+ * Kondisi backend: array rules langsung (dianggap AND) atau objek
+ * `{ logic: 'AND' | 'OR', rules: [...] }`.
+ */
+export type WorkflowConditions =
+  | WorkflowCondition[]
+  | { logic?: string; rules?: WorkflowCondition[] }
 
 export interface WorkflowAction {
   type?: string
-  delay_seconds?: number
   text?: string
+  label?: string
+  note?: string
+  template_id?: string
+  /** Aksi `delay`: durasi tunda dalam detik (backend membatasi maks 30). */
+  seconds?: number
+  /** Data lama dari builder v1.3: delay per aksi (dipertahankan apa adanya). */
+  delay_seconds?: number
+  /** Aksi `notify_admin`: chat ID admin tujuan (opsional). */
+  admin_chat_id?: number | string
+  chat_id?: number | string
   [key: string]: unknown
 }
 

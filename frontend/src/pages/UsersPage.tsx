@@ -32,6 +32,21 @@ const TIMELINE_LABEL: Record<string, string> = {
   tag: 'Tag',
 }
 
+/**
+ * Nama tampilan pengguna. Tidak boleh menghasilkan "undefined":
+ * nama lengkap → username → "Pengguna <id telegram>" → "Pengguna tanpa nama".
+ */
+export function userDisplayName(u: TelegramUser): string {
+  const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim()
+  if (fullName) return fullName
+  if (u.username) return u.username
+  const telegramId = u.telegram_user_id ?? u.telegram_id
+  if (telegramId !== undefined && telegramId !== null && telegramId !== '') {
+    return `Pengguna ${telegramId}`
+  }
+  return 'Pengguna tanpa nama'
+}
+
 export function UsersPage() {
   const queryClient = useQueryClient()
   const pushToast = useUiStore((s) => s.pushToast)
@@ -292,9 +307,7 @@ export function UsersPage() {
             <button type="button" onClick={() => openDetail(u)} className="w-full text-left">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="truncate font-bold">
-                    {[u.first_name, u.last_name].filter(Boolean).join(' ') || u.username || `User ${u.telegram_id ?? u.telegram_user_id ?? u.id}`}
-                  </p>
+                  <p className="truncate font-bold">{userDisplayName(u)}</p>
                   <p className="text-sm text-ink/60 dark:text-darktext/60">
                     {u.username ? `@${u.username}` : ''}{' '}
                     {u.telegram_id ?? u.telegram_user_id
@@ -334,14 +347,26 @@ export function UsersPage() {
         ) : detail ? (
           <div className="space-y-4">
             <div className="text-sm">
-              <p className="font-bold">
-                {[detail.first_name, detail.last_name].filter(Boolean).join(' ') || detail.username || `User ${detail.telegram_id ?? detail.telegram_user_id ?? detail.id}`}
-              </p>
-              <p className="text-ink/60 dark:text-darktext/60">
-                {detail.username ? `@${detail.username} · ` : ''}Telegram ID: {detail.telegram_id ?? detail.telegram_user_id ?? '—'}
+              <p className="min-w-0 break-words font-bold [overflow-wrap:anywhere]">{userDisplayName(detail)}</p>
+              <p className="min-w-0 break-words text-ink/60 [overflow-wrap:anywhere] dark:text-darktext/60">
+                {detail.username ? `@${detail.username} · ` : ''}Telegram ID:{' '}
+                {detail.telegram_user_id ?? detail.telegram_id ?? '—'}
               </p>
               <p className="text-ink/60 dark:text-darktext/60">
                 Bergabung: {detail.created_at ? new Date(detail.created_at).toLocaleString('id-ID') : '—'}
+              </p>
+              <p className="text-ink/60 dark:text-darktext/60">
+                Terakhir terlihat:{' '}
+                {(detail.last_seen_at ?? detail.last_seen)
+                  ? new Date((detail.last_seen_at ?? detail.last_seen) as string).toLocaleString('id-ID')
+                  : '—'}
+              </p>
+              <p className="text-ink/60 dark:text-darktext/60">
+                Jumlah pesan: {detail.message_count ?? '—'}
+              </p>
+              <p className="mt-1 flex items-center gap-1.5 text-ink/60 dark:text-darktext/60">
+                Status:{' '}
+                {detail.is_blocked ? <Badge tone="danger">Diblokir</Badge> : <Badge tone="success">Tidak diblokir</Badge>}
               </p>
             </div>
 
@@ -447,8 +472,8 @@ export function UsersPage() {
                 <ul className="space-y-2">
                   {userNotes.map((n) => (
                     <li key={String(n.id)} className="flex items-start justify-between gap-2 rounded-xl border border-ink/10 p-3 text-sm dark:border-darktext/10">
-                      <div>
-                        <p>{n.note}</p>
+                      <div className="min-w-0">
+                        <p className="break-words [overflow-wrap:anywhere]">{n.note}</p>
                         <p className="mt-0.5 text-xs text-ink/50 dark:text-darktext/50">
                           {n.created_at ? new Date(n.created_at).toLocaleString('id-ID') : ''}
                         </p>
@@ -518,7 +543,7 @@ export function UsersPage() {
                           {item.created_at ? new Date(item.created_at).toLocaleString('id-ID') : ''}
                         </span>
                       </div>
-                      <p className="mt-1">{item.summary}</p>
+                      <p className="mt-1 break-words [overflow-wrap:anywhere]">{item.summary}</p>
                     </li>
                   ))}
                 </ul>

@@ -7,6 +7,7 @@ import {
   markNotificationRead,
 } from '../api/misc'
 import { useUiStore } from '../stores/settings'
+import { redactBotTokens } from '../utils/redact'
 import { Badge, Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
 import { ConfirmDialog } from '../components/Modal'
 import { useState } from 'react'
@@ -86,9 +87,11 @@ export function NotificationsPage() {
         items.map((n) => (
           <Card key={String(n.id)} className={n.is_read ? 'opacity-75' : ''}>
             <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <p className="font-bold">{n.title ?? 'Notifikasi'}</p>
+                  <p className="min-w-0 break-words font-bold [overflow-wrap:anywhere]">
+                    {redactBotTokens(n.title ?? 'Notifikasi')}
+                  </p>
                   {!n.is_read && <Badge tone="info">Baru</Badge>}
                   {n.severity && (
                     <Badge tone={n.severity === 'error' || n.severity === 'critical' ? 'danger' : 'default'}>
@@ -96,10 +99,13 @@ export function NotificationsPage() {
                     </Badge>
                   )}
                 </div>
-                <p className="mt-1 text-sm text-ink/70 dark:text-darktext/70">{n.message ?? n.body ?? ''}</p>
-                <p className="mt-1 text-xs text-ink/50 dark:text-darktext/50">
+                {/* URL/teks panjang tanpa spasi harus wrap, bukan overflow menyamping. */}
+                <p className="mt-1 min-w-0 break-words text-sm text-ink/70 [overflow-wrap:anywhere] dark:text-darktext/70">
+                  {redactBotTokens(n.message ?? n.body ?? '')}
+                </p>
+                <p className="mt-1 min-w-0 break-words text-xs text-ink/50 [overflow-wrap:anywhere] dark:text-darktext/50">
                   {n.created_at ? new Date(n.created_at).toLocaleString('id-ID') : ''}
-                  {n.type ? ` · ${n.type}` : ''}
+                  {n.type ? ` · ${redactBotTokens(n.type)}` : ''}
                 </p>
               </div>
               <div className="flex shrink-0 gap-1">

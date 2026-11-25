@@ -20,6 +20,10 @@ pub struct ListNotificationsQuery {
 }
 
 /// Buat notifikasi + broadcast ke WebSocket.
+///
+/// Semua teks dan metadata JSON diredaksi di sini (terpusat) sebelum
+/// disimpan/disiarkan, agar pemanggil mana pun tidak bisa membocorkan
+/// token bot lewat pesan error.
 pub async fn create_notification(
     state: &AppState,
     notification_type: &str,
@@ -27,15 +31,20 @@ pub async fn create_notification(
     message: &str,
     data: serde_json::Value,
 ) {
+    let notification_type = crate::security::redact::redact_secrets(notification_type);
+    let title = crate::security::redact::redact_secrets(title);
+    let message = crate::security::redact::redact_secrets(message);
+    let mut data = data;
+    crate::security::redact::redact_json_value(&mut data);
     let id = new_id();
     let now = now_rfc3339();
     let _ = sqlx::query(
         "INSERT INTO notifications (id, type, title, message, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(notification_type)
-    .bind(title)
-    .bind(message)
+    .bind(&notification_type)
+    .bind(&title)
+    .bind(&message)
     .bind(data.to_string())
     .bind(&now)
     .execute(&state.pool)
@@ -133,4 +142,97 @@ pub async fn delete_notification(
         )));
     }
     Ok(Envelope::ok(json!({"deleted": true, "id": id})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Query, State};
+
+    fn synthetic_token() -> String {
+        format!("123456789:{}", "FAKE".repeat(9))
+    }
+
+    async fn test_state() -> AppState {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = crate::config::Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            database_url: "sqlite::memory:".to_string(),
+            api_key: "test-key".to_string(),
+            rust_log: "info".to_string(),
+        };
+        let crypto = std::sync::Arc::new(crate::security::Crypto::from_key_bytes([9u8; 32]));
+        let telegram = crate::bot::telegram::TelegramClient::new().unwrap();
+        AppState::new(pool, config, crypto, telegram)
+    }
+
+    #[tokio::test]
+    async fn create_notification_redacts_token_in_message_and_data() {
+        let state = test_state().await;
+        let token = synthetic_token();
+        create_notification(
+            &state,
+            "watchdog_failure",
+            "Bot tidak merespons getMe",
+            &format!("gagal: https://api.telegram.org/bot{token}/getMe"),
+            json!({"error": format!("bot {token} gagal"), "token": "pendek"}),
+        )
+        .await;
+        let (message, data): (String, String) =
+            sqlx::query_as("SELECT message, data FROM notifications LIMIT 1")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert!(!message.contains(&token));
+        assert!(!data.contains(&token));
+        assert!(!data.contains("pendek"));
+        // Output API juga tidak mengandung token.
+        let Json(envelope) = list_notifications(
+            State(state.clone()),
+            Query(ListNotificationsQuery::default()),
+        )
+        .await
+        .unwrap();
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains(&token));
+    }
+
+    #[tokio::test]
+    async fn legacy_notification_row_is_redacted_in_api_output() {
+        let state = test_state().await;
+        let token = synthetic_token();
+        // Baris lama yang sudah terlanjur menyimpan token (insert langsung).
+        sqlx::query(
+            "INSERT INTO notifications (id, type, title, message, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("legacy-1")
+        .bind("watchdog_failure")
+        .bind("Bot tidak merespons getMe")
+        .bind(format!("error lama https://api.telegram.org/bot{token}/getMe"))
+        .bind(json!({"error": format!("bot {token}")}).to_string())
+        .bind(now_rfc3339())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let Json(envelope) = list_notifications(
+            State(state.clone()),
+            Query(ListNotificationsQuery::default()),
+        )
+        .await
+        .unwrap();
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains(&token));
+        assert!(serialized.contains("****"));
+    }
 }

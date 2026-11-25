@@ -82,14 +82,16 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = self.status_and_code();
         // Log server-side; pesan ke klien tetap generik untuk error 500.
+        // Semua teks error diredaksi sebelum di-log/dikirim agar token
+        // bot (mis. dari URL reqwest) tidak pernah bocor.
         if status.is_server_error() {
-            tracing::error!("{code}: {self}");
+            tracing::error!("{code}: {}", crate::security::redact::redact_secrets(&self.to_string()));
         }
         let message = match &self {
             AppError::Sqlx(_) | AppError::Internal(_) | AppError::Anyhow(_) => {
                 "Terjadi kesalahan internal server".to_string()
             }
-            _ => self.to_string(),
+            _ => crate::security::redact::redact_secrets(&self.to_string()),
         };
         let body = Envelope::<serde_json::Value> {
             success: false,

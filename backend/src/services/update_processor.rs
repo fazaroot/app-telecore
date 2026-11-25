@@ -36,15 +36,22 @@ pub async fn log_activity(
     details: serde_json::Value,
     level: &str,
 ) {
+    // Redaksi terpusat sebelum disimpan: details JSON (termasuk pesan
+    // error dari pemanggil mana pun) tidak boleh mengandung token bot.
+    let action = crate::security::redact::redact_secrets(action);
+    let entity_type = entity_type.map(crate::security::redact::redact_secrets);
+    let entity_id = entity_id.map(crate::security::redact::redact_secrets);
+    let mut details = details;
+    crate::security::redact::redact_json_value(&mut details);
     let _ = sqlx::query(
         "INSERT INTO activity_logs (id, bot_id, action, entity_type, entity_id, details, level, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(new_id())
     .bind(bot_id)
-    .bind(action)
-    .bind(entity_type)
-    .bind(entity_id)
+    .bind(&action)
+    .bind(entity_type.as_deref())
+    .bind(entity_id.as_deref())
     .bind(details.to_string())
     .bind(level)
     .bind(now_rfc3339())
@@ -1063,6 +1070,30 @@ mod tests {
         .fetch_all(&state.pool)
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn log_activity_redacts_token_in_details() {
+        let state = test_state().await;
+        let token = format!("123456789:{}", "FAKE".repeat(9));
+        log_activity(
+            &state,
+            Some("bot-1"),
+            "watchdog_failure",
+            Some("bot"),
+            Some("bot-1"),
+            serde_json::json!({"error": format!("https://api.telegram.org/bot{token}/getMe gagal")}),
+            "error",
+        )
+        .await;
+        let details: String = sqlx::query_scalar(
+            "SELECT details FROM activity_logs WHERE action = 'watchdog_failure' LIMIT 1",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert!(!details.contains(&token));
+        assert!(details.contains("****"));
     }
 
     #[tokio::test]

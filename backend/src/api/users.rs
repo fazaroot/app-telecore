@@ -313,3 +313,82 @@ pub async fn export_users(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(response.into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_state() -> AppState {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let config = crate::config::Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            database_url: "sqlite::memory:".to_string(),
+            api_key: "test-key".to_string(),
+            rust_log: "info".to_string(),
+        };
+        let crypto = std::sync::Arc::new(crate::security::Crypto::from_key_bytes([9u8; 32]));
+        let telegram = crate::bot::telegram::TelegramClient::new().unwrap();
+        AppState::new(pool, config, crypto, telegram)
+    }
+
+    #[tokio::test]
+    async fn get_user_contract_wraps_user_with_recent_messages_and_activity() {
+        let state = test_state().await;
+        let token = format!("123456789:{}", "FAKE".repeat(9));
+        let now = "2026-11-25T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO bots (id, name, token_encrypted, token_masked, status, created_at, updated_at) \
+             VALUES ('bot-1', 'Bot Test', 'enc', '****', 'connected', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bot_users (id, bot_id, telegram_user_id, username, first_name, created_at, updated_at) \
+             VALUES ('user-1', 'bot-1', 777, 'budi', 'Budi', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        // Baris activity lama berisi token sintetis: output harus teredaksi.
+        sqlx::query(
+            "INSERT INTO activity_logs (id, bot_id, action, entity_type, entity_id, details, level, created_at) \
+             VALUES ('act-1', 'bot-1', 'watchdog_failure', 'bot_user', '777', ?, 'error', ?)",
+        )
+        .bind(json!({"error": format!("bot {token}")}).to_string())
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let Json(envelope) = get_user(State(state.clone()), Path("user-1".to_string()))
+            .await
+            .unwrap();
+        let data = envelope.data.unwrap();
+        // Kontrak yang dipertahankan: {user: {...}, recent_messages, activity}.
+        assert_eq!(data["user"]["id"], "user-1");
+        assert_eq!(data["user"]["telegram_user_id"], 777);
+        assert_eq!(data["user"]["created_at"], now);
+        assert!(data["recent_messages"].is_array());
+        assert!(data["activity"].is_array());
+        assert_eq!(data["activity"][0]["action"], "watchdog_failure");
+        // Token lama tidak tampil di output activity.
+        let serialized = data.to_string();
+        assert!(!serialized.contains(&token));
+    }
+}

@@ -14,7 +14,14 @@ import { useUiStore } from '../stores/settings'
 import { Badge, Card, EmptyState, ErrorState, LoadingSpinner, PageHeader } from '../components/ui'
 import { ConfirmDialog, Modal } from '../components/Modal'
 import { WorkflowBuilder } from '../components/WorkflowBuilder'
-import type { Workflow, WorkflowAction, WorkflowCondition } from '../types'
+import {
+  defaultBuilderState,
+  nodesToWorkflowPayload,
+  validateBuilder,
+  workflowToNodes,
+  type BuilderState,
+} from '../components/workflowNodes'
+import type { Workflow } from '../types'
 
 const inputCls =
   'w-full rounded-lg border border-ink/15 bg-bg px-3 py-2 text-sm dark:border-darktext/15 dark:bg-darkbg'
@@ -30,10 +37,8 @@ export function AutomationPage() {
 
   const [wfBotId, setWfBotId] = useState('')
   const [wfName, setWfName] = useState('')
-  const [triggerType, setTriggerType] = useState('message_received')
-  const [triggerValue, setTriggerValue] = useState('')
-  const [conditions, setConditions] = useState<WorkflowCondition[]>([])
-  const [actions, setActions] = useState<WorkflowAction[]>([])
+  const [builderState, setBuilderState] = useState<BuilderState>(() => defaultBuilderState())
+  const [saveAttempted, setSaveAttempted] = useState(false)
 
   const botsQuery = useQuery({ queryKey: ['bots'], queryFn: fetchBots })
   const workflowsQuery = useQuery({
@@ -50,29 +55,18 @@ export function AutomationPage() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      // Engine backend membaca trigger_config.keywords (array) untuk trigger
-      // keyword, dan trigger_config.command untuk trigger command.
-      const triggerConfig =
-        triggerType === 'keyword' && triggerValue.trim()
-          ? { keywords: [triggerValue.trim()] }
-          : triggerType === 'command' && triggerValue.trim()
-            ? { command: triggerValue.trim() }
-            : undefined
-      const payload = {
-        bot_id: wfBotId || undefined,
-        name: wfName.trim(),
-        trigger_type: triggerType,
-        trigger_config: triggerConfig,
-        conditions,
-        actions,
-        is_enabled: editing?.is_enabled ?? true,
-      }
+      const payload = nodesToWorkflowPayload(builderState, {
+        botId: wfBotId,
+        name: wfName,
+        isEnabled: editing?.is_enabled ?? true,
+      })
       return editing ? updateWorkflow(editing.id, payload) : createWorkflow(payload)
     },
     onSuccess: () => {
       pushToast(editing ? 'Workflow diperbarui.' : 'Workflow dibuat.', 'success')
       setShowForm(false)
       setEditing(null)
+      setSaveAttempted(false)
       invalidate()
     },
     onError: (e: Error) => pushToast(e.message, 'error'),
@@ -101,18 +95,17 @@ export function AutomationPage() {
     setEditing(wf ?? null)
     setWfBotId(wf?.bot_id !== undefined ? String(wf.bot_id) : '')
     setWfName(wf?.name ?? '')
-    setTriggerType(wf?.trigger_type ?? 'message_received')
-    setTriggerValue(
-      String(
-        (wf?.trigger_config?.keywords as string[] | undefined)?.[0] ??
-          wf?.trigger_config?.command ??
-          wf?.trigger_config?.value ??
-          '',
-      ),
-    )
-    setConditions(wf?.conditions ?? [])
-    setActions(wf?.actions ?? [])
+    setBuilderState(workflowToNodes(wf))
+    setSaveAttempted(false)
     setShowForm(true)
+  }
+
+  const validationErrors = validateBuilder(builderState, { botId: wfBotId, name: wfName })
+
+  const handleSave = () => {
+    setSaveAttempted(true)
+    if (validationErrors.length > 0) return
+    saveMutation.mutate()
   }
 
   const bots = botsQuery.data ?? []
@@ -145,7 +138,8 @@ export function AutomationPage() {
         }
       />
       <p className="-mt-2 text-xs text-ink/50 dark:text-darktext/50">
-        Builder berbasis langkah: pilih trigger, tambah kondisi, lalu tambah aksi. Bukan drag-drop.
+        Builder visual: klik node di kanvas untuk mengeditnya di panel Properties. Urutan action diubah
+        dengan tombol naik/turun, bukan drag-drop.
       </p>
 
       <select
@@ -182,9 +176,11 @@ export function AutomationPage() {
           <Card key={String(wf.id)}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="font-bold">{wf.name ?? 'Workflow tanpa nama'}</p>
-                <p className="text-sm text-ink/60 dark:text-darktext/60">
-                  Trigger: {wf.trigger_type ?? '—'} · {wf.conditions?.length ?? 0} kondisi · {wf.actions?.length ?? 0} aksi
+                <p className="break-words font-bold [overflow-wrap:anywhere]">{wf.name ?? 'Workflow tanpa nama'}</p>
+                <p className="break-words text-sm text-ink/60 [overflow-wrap:anywhere] dark:text-darktext/60">
+                  Trigger: {wf.trigger_type ?? '—'} ·{' '}
+                  {(Array.isArray(wf.conditions) ? wf.conditions.length : (wf.conditions?.rules?.length ?? 0))}{' '}
+                  kondisi · {wf.actions?.length ?? 0} aksi
                 </p>
               </div>
               <Badge tone={wf.is_enabled ? 'success' : 'default'}>{wf.is_enabled ? 'Aktif' : 'Nonaktif'}</Badge>
@@ -241,20 +237,23 @@ export function AutomationPage() {
             <span className="mb-1 block font-medium">Nama workflow</span>
             <input value={wfName} onChange={(e) => setWfName(e.target.value)} placeholder="mis. Balas kata 'harga'" className={inputCls} />
           </label>
-          <WorkflowBuilder
-            triggerType={triggerType}
-            triggerValue={triggerValue}
-            conditions={conditions}
-            actions={actions}
-            onTriggerTypeChange={setTriggerType}
-            onTriggerValueChange={setTriggerValue}
-            onConditionsChange={setConditions}
-            onActionsChange={setActions}
-          />
+          <WorkflowBuilder state={builderState} onChange={setBuilderState} />
+          {saveAttempted && validationErrors.length > 0 && (
+            <div className="rounded-xl bg-danger/10 p-3 text-sm text-danger" role="alert">
+              <p className="font-semibold">Perbaiki dulu sebelum menyimpan:</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                {validationErrors.map((error) => (
+                  <li key={error} className="break-words [overflow-wrap:anywhere]">
+                    {error}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <button
             type="button"
-            disabled={!wfBotId || !wfName.trim() || actions.length === 0 || saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
+            disabled={saveMutation.isPending}
+            onClick={handleSave}
             className="w-full rounded-full bg-primary py-2.5 text-sm font-bold text-white disabled:opacity-50"
           >
             {saveMutation.isPending ? 'Menyimpan…' : 'Simpan Workflow'}

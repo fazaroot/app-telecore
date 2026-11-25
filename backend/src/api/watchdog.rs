@@ -62,7 +62,7 @@ pub async fn get_status(
                 .ok()?
                 .get("error")
                 .and_then(|e| e.as_str())
-                .map(|s| s.to_string())
+                .map(crate::security::redact::redact_secrets)
         });
         out.push(WatchdogBotStatus {
             bot_id: bot.id.clone(),

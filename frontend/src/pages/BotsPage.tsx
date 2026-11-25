@@ -185,6 +185,7 @@ export function BotsPage() {
   const [newName, setNewName] = useState('')
   const [newToken, setNewToken] = useState('')
   const [editName, setEditName] = useState('')
+  const [editToken, setEditToken] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const botsQuery = useQuery({ queryKey: ['bots'], queryFn: fetchBots })
@@ -209,10 +210,16 @@ export function BotsPage() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: () => updateBot(editing!.id, { name: editName.trim() }),
+    mutationFn: () =>
+      updateBot(editing!.id, {
+        name: editName.trim(),
+        // Token hanya dikirim bila field diisi (ganti token).
+        ...(editToken.trim() ? { token: editToken.trim() } : {}),
+      }),
     onSuccess: () => {
       pushToast('Bot diperbarui.', 'success')
       setEditing(null)
+      setEditToken('')
       invalidate()
     },
     onError: (e: Error) => pushToast(e.message, 'error'),
@@ -447,10 +454,11 @@ export function BotsPage() {
                   onClick={() => {
                     setEditing(bot)
                     setEditName(bot.name ?? '')
+                    setEditToken('')
                   }}
                   className="rounded-full bg-ink/10 px-3 py-1.5 text-xs font-semibold dark:bg-darktext/10"
                 >
-                  Edit Nama
+                  Edit Bot
                 </button>
                 <button
                   type="button"
@@ -497,13 +505,37 @@ export function BotsPage() {
         </div>
       </Modal>
 
-      {/* Edit nama */}
-      <Modal open={editing !== null} onClose={() => setEditing(null)} title="Edit Bot">
+      {/* Edit bot (nama + ganti token). Isi modal hanya memakai state string,
+          tidak dereferensi `editing` di JSX — elemen JSX dievaluasi saat
+          parent di-render walau modal tertutup (pelajaran v1.2.1). */}
+      <Modal
+        open={editing !== null}
+        onClose={() => {
+          setEditing(null)
+          setEditToken('')
+        }}
+        title="Edit Bot"
+      >
         <div className="space-y-3">
           <label className="block text-sm">
             <span className="mb-1 block font-medium">Nama bot</span>
             <input value={editName} onChange={(e) => setEditName(e.target.value)} className={inputCls} />
           </label>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium">Token baru (opsional)</span>
+            <input
+              value={editToken}
+              onChange={(e) => setEditToken(e.target.value)}
+              placeholder="Kosongkan bila tidak mengganti token"
+              type="password"
+              autoComplete="off"
+              className={inputCls}
+            />
+          </label>
+          <p className="rounded-xl bg-amber-500/15 p-3 text-sm text-amber-700 dark:text-amber-400">
+            Token lama tidak ditampilkan. Isi hanya bila mengganti token, dan token baru harus milik
+            bot yang sama (dari @BotFather) — backend akan memvalidasinya.
+          </p>
           <button
             type="button"
             disabled={!editName.trim() || updateMutation.isPending}

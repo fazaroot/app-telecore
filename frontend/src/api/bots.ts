@@ -18,7 +18,15 @@ export async function createBot(payload: { name: string; token: string }): Promi
   return apiRequest<Bot>('/api/bots', { method: 'POST', body: payload })
 }
 
-export async function updateBot(id: string | number, payload: Partial<Bot>): Promise<Bot> {
+/** Payload PUT /api/bots/{id}. `token` hanya dikirim bila mengganti token. */
+export interface UpdateBotPayload {
+  name?: string
+  description?: string
+  is_active?: boolean
+  token?: string
+}
+
+export async function updateBot(id: string | number, payload: UpdateBotPayload): Promise<Bot> {
   return apiRequest<Bot>(`/api/bots/${id}`, { method: 'PUT', body: payload })
 }
 

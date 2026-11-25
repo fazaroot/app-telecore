@@ -1,5 +1,5 @@
 import { apiDownload, apiRequest, asArray } from './client'
-import type { Group, GroupSettings, ModerationLogEntry, TelegramUser } from '../types'
+import type { Group, GroupSettings, Message, ModerationLogEntry, TelegramUser } from '../types'
 
 export interface UserFilters {
   bot_id?: string | number
@@ -27,8 +27,31 @@ export async function fetchUsers(filters: UserFilters = {}): Promise<TelegramUse
   return asArray<TelegramUser>(data, ['users', 'items', 'data'])
 }
 
+/**
+ * Bentuk respons backend GET /api/users/{id}:
+ * `{ user: BotUser, recent_messages: Message[], activity: ActivityLog[] }`
+ * — BUKAN TelegramUser langsung. Menganggapnya user langsung membuat
+ * detail tampil "User undefined" dengan ID/tanggal kosong.
+ */
+export interface UserDetailResponse {
+  user: TelegramUser
+  recent_messages?: Message[]
+  activity?: Record<string, unknown>[]
+}
+
+export async function fetchUserDetail(id: string | number): Promise<UserDetailResponse> {
+  const data = await apiRequest<UserDetailResponse | TelegramUser>(`/api/users/${id}`)
+  if (data && typeof data === 'object' && 'user' in data && data.user) {
+    return data as UserDetailResponse
+  }
+  // Toleransi: bila suatu saat backend mengembalikan user langsung,
+  // bungkus ke bentuk yang sama agar UI tidak crash.
+  return { user: data as TelegramUser, recent_messages: [], activity: [] }
+}
+
 export async function fetchUser(id: string | number): Promise<TelegramUser> {
-  return apiRequest<TelegramUser>(`/api/users/${id}`)
+  const detail = await fetchUserDetail(id)
+  return detail.user
 }
 
 export async function updateUser(

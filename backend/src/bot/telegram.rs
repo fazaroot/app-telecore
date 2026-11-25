@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::error::{AppError, AppResult};
+use crate::security::redact::redact_known_secret;
 
 // ---------------------------------------------------------------------------
 // Tipe respons Telegram
@@ -223,6 +224,14 @@ impl TelegramClient {
         format!("{}/bot{}/{}", self.base_url, token, method)
     }
 
+    /// Sanitasi detail error sebelum menjadi `AppError::Telegram`.
+    /// Error reqwest menyertakan URL request yang mengandung token bot,
+    /// jadi token persis yang sedang dipakai diganti dulu, lalu pola
+    /// secret generik diredaksi.
+    fn sanitize_detail(token: &str, detail: &str) -> String {
+        redact_known_secret(detail, token)
+    }
+
     async fn call<T: DeserializeOwned, B: Serialize>(
         &self,
         token: &str,
@@ -236,9 +245,12 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|e| {
-                AppError::Telegram(format!("gagal menghubungi api.telegram.org ({method}): {e}"))
+                AppError::Telegram(format!(
+                    "gagal menghubungi api.telegram.org ({method}): {}",
+                    Self::sanitize_detail(token, &e.to_string())
+                ))
             })?;
-        self.parse_response(resp, method).await
+        self.parse_response(resp, token, method).await
     }
 
     async fn call_multipart<T: DeserializeOwned>(
@@ -254,18 +266,25 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|e| {
-                AppError::Telegram(format!("gagal menghubungi api.telegram.org ({method}): {e}"))
+                AppError::Telegram(format!(
+                    "gagal menghubungi api.telegram.org ({method}): {}",
+                    Self::sanitize_detail(token, &e.to_string())
+                ))
             })?;
-        self.parse_response(resp, method).await
+        self.parse_response(resp, token, method).await
     }
 
     async fn parse_response<T: DeserializeOwned>(
         &self,
         resp: reqwest::Response,
+        token: &str,
         method: &str,
     ) -> AppResult<T> {
         let parsed: TelegramResponse<T> = resp.json().await.map_err(|e| {
-            AppError::Telegram(format!("respons Telegram tidak valid ({method}): {e}"))
+            AppError::Telegram(format!(
+                "respons Telegram tidak valid ({method}): {}",
+                Self::sanitize_detail(token, &e.to_string())
+            ))
         })?;
         if parsed.ok {
             parsed
@@ -276,7 +295,7 @@ impl TelegramClient {
                 "Telegram API error {} ({}): {}",
                 parsed.error_code.unwrap_or(0),
                 method,
-                parsed.description.unwrap_or_default()
+                Self::sanitize_detail(token, &parsed.description.unwrap_or_default())
             )))
         }
     }
@@ -625,8 +644,74 @@ impl TelegramClient {
     }
 }
 
+/// Server Telegram palsu untuk test (TCP lokal): membalas setiap request
+/// dengan JSON dari handler dan merekam request mentah ke channel.
+/// Dipakai test klien, bots, dan automation tanpa menyentuh
+/// api.telegram.org.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::mpsc::{channel, Receiver};
+
+    pub fn fake_telegram_server(canned: &str) -> (String, Receiver<String>) {
+        let canned = canned.to_string();
+        fake_telegram_server_with_handler(move |_| canned.clone())
+    }
+
+    pub fn fake_telegram_server_with_handler<F>(handler: F) -> (String, Receiver<String>)
+    where
+        F: Fn(&str) -> String + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = channel::<String>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            head.push_str(&line);
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let content_len = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("Content-Length:")
+                            .or_else(|| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; content_len];
+                if content_len > 0 {
+                    let _ = reader.read_exact(&mut body);
+                }
+                let raw = format!("{head}{}", String::from_utf8_lossy(&body));
+                let canned = handler(&raw);
+                let _ = tx.send(raw);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    canned.len(),
+                    canned
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::fake_telegram_server;
     use super::*;
 
     #[test]
@@ -699,59 +784,6 @@ mod tests {
         assert_eq!(members[0].first_name, "Citra");
     }
 
-    /// Server Telegram palsu (TCP lokal): membalas setiap request dengan
-    /// `canned` JSON dan merekam request mentah ke channel. Dipakai untuk
-    /// menguji method client tanpa menyentuh api.telegram.org.
-    fn fake_telegram_server(
-        canned: &str,
-    ) -> (String, std::sync::mpsc::Receiver<String>) {
-        use std::io::{BufRead, BufReader, Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let canned = canned.to_string();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut head = String::new();
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            head.push_str(&line);
-                            if line == "\r\n" {
-                                break;
-                            }
-                        }
-                    }
-                }
-                let content_len = head
-                    .lines()
-                    .find_map(|l| {
-                        l.strip_prefix("Content-Length:")
-                            .or_else(|| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                    })
-                    .unwrap_or(0);
-                let mut body = vec![0u8; content_len];
-                if content_len > 0 {
-                    let _ = reader.read_exact(&mut body);
-                }
-                let raw = format!("{head}{}", String::from_utf8_lossy(&body));
-                let _ = tx.send(raw);
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    canned.len(),
-                    canned
-                );
-                let _ = stream.write_all(resp.as_bytes());
-            }
-        });
-        (format!("http://{addr}"), rx)
-    }
-
     #[tokio::test]
     async fn get_chat_member_count_against_fake_server() {
         let (base, rx) = fake_telegram_server(r#"{"ok":true,"result":42}"#);
@@ -785,5 +817,60 @@ mod tests {
         let client = TelegramClient::with_base_url(base).unwrap();
         let err = client.get_chat_member_count("FAKE", -100123).await.unwrap_err();
         assert!(err.to_string().contains("403"));
+    }
+
+    fn synthetic_token() -> String {
+        // Token sintetis yang jelas palsu, dibangun saat runtime.
+        format!("123456789:{}", "FAKE".repeat(9))
+    }
+
+    #[test]
+    fn sanitize_detail_redacts_token_in_reqwest_url() {
+        let token = synthetic_token();
+        let detail = format!(
+            "error sending request for url (https://api.telegram.org/bot{token}/getMe): connection failed"
+        );
+        let out = TelegramClient::sanitize_detail(&token, &detail);
+        assert!(!out.contains(&token));
+        assert!(out.contains("/bot****/getMe"));
+    }
+
+    #[tokio::test]
+    async fn api_error_description_does_not_leak_token() {
+        let token = synthetic_token();
+        let canned = format!(
+            "{{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized for bot {token}\"}}"
+        );
+        let (base, _rx) = fake_telegram_server(&canned);
+        let client = TelegramClient::with_base_url(base).unwrap();
+        let err = client.get_me(&token).await.unwrap_err();
+        assert!(!err.to_string().contains(&token));
+        assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn reqwest_connection_error_does_not_leak_token() {
+        // Port tertutup: reqwest gagal konek dan error-nya menyertakan URL.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let token = synthetic_token();
+        let client = TelegramClient::with_base_url(format!("http://{addr}")).unwrap();
+        let err = client.get_me(&token).await.unwrap_err();
+        assert!(!err.to_string().contains(&token));
+        // Jalur multipart memakai sanitasi yang sama.
+        let err = client
+            .send_media_bytes(
+                &token,
+                "sendPhoto",
+                "photo",
+                123,
+                vec![1, 2, 3],
+                "x.jpg".to_string(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains(&token));
     }
 }

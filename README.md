@@ -59,11 +59,39 @@ fitur berbayar di TeleCore.
 - **Live Logs** — halaman Logs: 200 baris log server terakhir, live via
   WebSocket (fallback polling 5 detik).
 - **Per-bot analytics** — breakdown statistik per bot + export CSV.
-- Versi: backend `1.3.0` (`/api/health`), aplikasi `TeleCore v1.3.0`.
+- Versi: backend `1.4.0` (`/api/health`), aplikasi `TeleCore v1.4.0`.
 - **v1.2.1** — perbaikan bug halaman My Bots blank putih: form AI di modal
   pengaturan bot dereferensi `configBot` yang masih null saat halaman
   di-render. Ditambah `ErrorBoundary` agar error render menampilkan layar
   error yang bisa dipulihkan, bukan layar putih.
+
+## Yang baru di v1.4.0 — Visual Automation Builder + perbaikan notifikasi/Users
+
+Semua fitur di bawah ini **gratis, tanpa paywall di mana pun**.
+
+- **Visual Automation Builder** — Automation kini memakai kanvas node
+  vertikal Trigger → Condition → Action dengan garis penghubung. Klik node
+  untuk mengeditnya di panel Properties; tambah Condition/Action, hapus node,
+  dan urutkan action naik/turun. Kanvas bisa di-scroll dan teks node wrap,
+  jadi nyaman di HP tanpa overflow menyamping (builder node visual, bukan
+  drag-drop). Dua aksi baru: **Simpan aktivitas** (`save_activity`) menulis
+  activity log, dan **Kirim notifikasi admin** (`notify_admin`) membuat
+  notifikasi in-app dan, bila `admin_chat_id` diisi, mengirim pesan Telegram
+  ke chat admin. Workflow lama tetap bisa dibuka dan diedit tanpa kehilangan
+  aksi lama. Lihat [docs/AUTOMATION.md](docs/AUTOMATION.md).
+- **Notifikasi tidak lagi overflow** — URL/teks panjang tanpa spasi di pesan
+  notifikasi kini wrap di dalam kartu, tidak keluar menyamping.
+- **Token bot tidak pernah tampil utuh** — error Telegram, notifikasi,
+  activity log, log file, dan respons API kini meredaksi token bot sebelum
+  ditampilkan/disimpan; baris lama yang terlanjur menyimpan token dibersihkan
+  saat backend startup. Bila token pernah terlihat di screenshot, revoke token
+  lama di BotFather lalu pasang token baru lewat **Edit Bot → Token baru**.
+- **Ganti token bot** — modal Edit Bot punya field "Token baru (opsional)".
+  Token baru divalidasi dengan `getMe` dan harus milik bot yang sama; token
+  lama tidak pernah ditampilkan.
+- **Detail Pengguna diperbaiki** — nama, Telegram ID, tanggal bergabung,
+  terakhir terlihat, jumlah pesan, status blokir, tag, catatan, dan timeline
+  kini tampil benar (tidak lagi "User undefined"/kosong).
 
 ## Yang baru di v1.3.0 — CRM + manajemen grup
 
@@ -98,7 +126,9 @@ fitur berbayar di TeleCore.
 - **Dashboard** — total bot, bot aktif/nonaktif, pesan masuk/keluar, total
   pengguna, status automation/API/server/DB, error monitoring, grafik traffic,
   live activity feed via WebSocket.
-- **My Bots** — tambah bot via token (validasi `getMe`), edit, hapus,
+- **My Bots** — tambah bot via token (validasi `getMe`), edit, **ganti token
+  bot (rotasi, divalidasi milik bot yang sama; token lama tidak pernah
+  ditampilkan)**, hapus,
   aktif/nonaktif, uji koneksi, webhook & long polling (saling eksklusif),
   export/import konfigurasi (token diekspor **terenkripsi**, bukan plaintext).
 - **Messages** — kirim teks, foto, dokumen, video, audio, animasi (file dari
@@ -107,10 +137,14 @@ fitur berbayar di TeleCore.
   teks yang gagal, template lokal perangkat, **broadcast ke banyak penerima**,
   **template variables** (`{{first_name}}`, `{{username}}`,
   `{{chat_title}}`) dengan preview render server, **pencarian riwayat pesan**.
-- **Automation** — workflow builder berbasis langkah (trigger → kondisi →
-  aksi, multi-step + delay), welcome message, auto-reply, keyword, command,
-  history eksekusi, enable/disable per workflow, loop guard (maks 10 eksekusi
-  per workflow per menit, maks 20 langkah, pesan dari bot sendiri diabaikan).
+- **Automation** — Visual Automation Builder: kanvas node Trigger →
+  Condition → Action dengan panel Properties (tambah/hapus node, urutkan
+  action), welcome message, auto-reply, keyword, command, history eksekusi,
+  enable/disable per workflow, loop guard (maks 10 eksekusi per workflow per
+  menit, maks 20 langkah, pesan dari bot sendiri diabaikan). Aksi: kirim
+  balasan, kirim template, tambah label, simpan catatan, delay, **simpan
+  aktivitas**, **kirim notifikasi admin**. Lihat
+  [docs/AUTOMATION.md](docs/AUTOMATION.md).
 - **Users** — daftar pengguna, profil, search/filter (bot, status blokir,
   label, **tag, segmen**), notes, label, **tag berwarna, timeline, catatan
   (tambah/hapus)**, block/unblock, export CSV (**termasuk kolom tag**).
@@ -264,18 +298,20 @@ passphrase backup di UI, pemetaan field scheduler/command/automation, bug
 mengabaikan jam cron, dan tombol inline keyboard dengan `url` + `callback_data`
 bersamaan (ditolak Telegram).
 
-## Hasil verifikasi frontend v1.3.0 (2026-11-25)
+## Hasil verifikasi v1.4.0 (2026-11-25)
 
 | Pemeriksaan | Hasil |
 |---|---|
+| `cargo test` (backend) | **138 passed, 0 failed** (termasuk redaksi token, ganti token, kontrak get_user, aksi `save_activity`/`notify_admin`, workflow contoh end-to-end) |
+| `cargo build` (backend) | Lolos |
 | `npx tsc --noEmit` (frontend) | **0 error** |
-| `npm test` / vitest (frontend) | **49 passed, 0 failed** (43 dari v1–v1.2 + 6 baru v1.3: regresi modal-tertutup Users/Groups/Segments, preview segmen, `criteriaSummary`) |
+| `npm test` / vitest (frontend) | **70 passed, 0 failed** (11 file; termasuk regresi notifikasi URL panjang, Detail Pengguna, ganti token, Visual Builder) |
 | `npm run build` (frontend) | Lolos |
-| `npx cap sync android` | Lolos, 8 plugin Capacitor terdeteksi |
+| `npx cap sync android` | Lolos |
+| Smoke test API (server + DB sementara) | **8/8**: health 1.4.0, bentuk `get_user`, token palsu ditolak tanpa bocor, workflow aksi baru, aksi tak dikenal 400, notifikasi lama teredaksi |
 
-Catatan: angka di atas hanya frontend. Verifikasi backend v1.3 (cargo test,
-smoke API endpoint baru) adalah tanggung jawab pekerjaan backend dan belum
-termasuk di sini; endpoint v1.3 belum diuji live terhadap backend nyata.
+Catatan: pengujian live dengan bot/grup Telegram nyata adalah langkah Astr di
+perangkat; smoke test memakai token palsu dan DB sementara.
 
 ## Batasan yang diketahui (v1.1)
 

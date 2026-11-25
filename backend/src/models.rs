@@ -30,6 +30,41 @@ where
     parsed.serialize(serializer)
 }
 
+/// Serialisasi string dengan redaksi secret (token bot tidak pernah
+/// tampil utuh lewat API, termasuk baris lama di DB).
+pub fn ser_redacted_str<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    crate::security::redact::redact_secrets(value).serialize(serializer)
+}
+
+/// Versi opsional dari [`ser_redacted_str`].
+pub fn ser_redacted_opt_str<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(v) => serializer.serialize_some(&crate::security::redact::redact_secrets(v)),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Serialisasi kolom JSON-TEXT sebagai nilai JSON asli yang sudah
+/// diredaksi rekursif (metadata notifikasi/activity tidak membocorkan token).
+pub fn ser_redacted_json_str<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(mut parsed) => {
+            crate::security::redact::redact_json_value(&mut parsed);
+            parsed.serialize(serializer)
+        }
+        Err(_) => crate::security::redact::redact_secrets(value).serialize(serializer),
+    }
+}
+
 /// Serialisasi flag INTEGER 0/1 sebagai boolean.
 pub fn ser_i64_bool<S>(value: &i64, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -240,6 +275,7 @@ pub struct Message {
     pub from_user_id: Option<i64>,
     pub reply_to_message_id: Option<i64>,
     pub parse_mode: Option<String>,
+    #[serde(serialize_with = "ser_redacted_opt_str")]
     pub error_message: Option<String>,
     #[serde(serialize_with = "ser_i64_bool")]
     pub is_read: i64,
@@ -289,6 +325,7 @@ pub struct AutomationExecution {
     pub trigger_event: Option<String>,
     pub status: String,
     pub steps_executed: i64,
+    #[serde(serialize_with = "ser_redacted_opt_str")]
     pub error_message: Option<String>,
     pub duration_ms: i64,
     pub created_at: String,
@@ -329,9 +366,11 @@ pub struct Notification {
     #[serde(rename = "type")]
     #[sqlx(rename = "type")]
     pub notification_type: String,
+    #[serde(serialize_with = "ser_redacted_str")]
     pub title: String,
+    #[serde(serialize_with = "ser_redacted_str")]
     pub message: String,
-    #[serde(serialize_with = "ser_json_str")]
+    #[serde(serialize_with = "ser_redacted_json_str")]
     pub data: String, // JSON object string
     #[serde(serialize_with = "ser_i64_bool")]
     pub is_read: i64,
@@ -342,10 +381,13 @@ pub struct Notification {
 pub struct ActivityLog {
     pub id: String,
     pub bot_id: Option<String>,
+    #[serde(serialize_with = "ser_redacted_str")]
     pub action: String,
+    #[serde(serialize_with = "ser_redacted_opt_str")]
     pub entity_type: Option<String>,
+    #[serde(serialize_with = "ser_redacted_opt_str")]
     pub entity_id: Option<String>,
-    #[serde(serialize_with = "ser_json_str")]
+    #[serde(serialize_with = "ser_redacted_json_str")]
     pub details: String, // JSON object string
     pub level: String,
     pub created_at: String,
